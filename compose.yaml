@@ -26,6 +26,48 @@ services:
       retries: 10
       start_period: 10s
 
+  redis:
+    image: redis:8.10.3-alpine
+    restart: unless-stopped
+    # Cache only: no persistence, bounded memory, least-recently-used eviction.
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4.4.0-management-alpine
+    restart: unless-stopped
+    # RabbitMQ keys its data by node name, which derives from the hostname.
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
   gateway:
     image: nginx:1.30.6-alpine
     restart: unless-stopped
@@ -42,3 +84,4 @@ services:
 
 volumes:
   postgres-data:
+  rabbitmq-data:
