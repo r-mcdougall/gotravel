@@ -41,4 +41,10 @@ make up                # start the stack
 make psql              # open a psql session as the superuser
 ```
 
+The API gateway listens on <http://localhost:8080> (`GATEWAY_PORT` in `.env`).
 Run `make` to list all available targets.
+
+## API gateway
+
+Nginx is the only public entry point. Unknown paths return `404`, and every
+response carries an `X-Request-ID` header, taken from the request or generated.
