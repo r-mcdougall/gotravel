@@ -2,7 +2,7 @@
 
 COMPOSE := docker compose
 
-.PHONY: help up down reset logs ps psql
+.PHONY: help up down reset logs ps psql lint fmt test
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-8s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -28,3 +28,12 @@ ps: ## Show service status
 
 psql: ## Open psql as the superuser
 	$(COMPOSE) exec postgres sh -c 'psql -U "$$POSTGRES_USER" -d postgres'
+
+lint: ## Run golangci-lint
+	golangci-lint run ./...
+
+fmt: ## Format code (gofmt + goimports)
+	golangci-lint fmt ./...
+
+test: ## Run tests with the race detector
+	go test -race ./...
