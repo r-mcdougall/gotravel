@@ -1,0 +1,23 @@
+# Environment
+.env
+!.env.example
+
+# Build output
+/bin/
+/dist/
+
+# Go test and coverage artifacts
+*.test
+*.out
+coverage.*
+*.prof
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local scratch
+/tmp/
