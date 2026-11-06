@@ -1,4 +1,4 @@
-# GoTravel
+# gotravel
 
 A flight booking backend inspired by Traveloka, built as a set of Go microservices.
 
@@ -48,4 +48,11 @@ Run `make` to list all available targets.
 ## API gateway
 
 Nginx is the only public entry point. Unknown paths return `404`, and every
-response carries an `X-Request-ID` header, taken from the request or generated.
+response carries an `X-Request-ID` header, taken from the request or generated
+and forwarded to the service.
+
+| Public path prefix                | Service |
+|-----------------------------------|---------|
+| `/api/v1/auth`, `/api/v1/users`   | `auth`  |
+
+Service `/healthz` and `/metrics` are not exposed through the gateway.
