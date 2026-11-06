@@ -68,6 +68,19 @@ services:
       retries: 10
       start_period: 20s
 
+  auth:
+    build:
+      context: .
+      args:
+        SERVICE: auth
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
   gateway:
     image: nginx:1.30.6-alpine
     restart: unless-stopped
