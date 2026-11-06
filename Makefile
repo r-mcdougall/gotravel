@@ -12,7 +12,7 @@ help: ## Show available targets
 	@echo "Created .env from .env.example; review it before continuing."
 
 up: .env ## Start all services in the background
-	$(COMPOSE) up -d --wait
+	$(COMPOSE) up -d --build --wait
 
 down: ## Stop all services
 	$(COMPOSE) down
