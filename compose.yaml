@@ -100,6 +100,24 @@ services:
       retries: 5
       start_period: 10s
 
+  loki:
+    image: grafana/loki:3.7.9
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./deploy/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+
+  alloy:
+    image: grafana/alloy:v1.21.3
+    restart: unless-stopped
+    depends_on:
+      - loki
+    volumes:
+      - ./deploy/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
   gateway:
     image: nginx:1.30.6-alpine
     restart: unless-stopped
@@ -118,3 +136,5 @@ volumes:
   postgres-data:
   rabbitmq-data:
   prometheus-data:
+  loki-data:
+  alloy-data:
