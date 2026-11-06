@@ -1,4 +1,4 @@
-# gotravel
+# GoTravel
 
 A flight booking backend inspired by Traveloka, built as a set of Go microservices.
 
@@ -43,6 +43,8 @@ make psql              # open a psql session as the superuser
 
 The API gateway listens on <http://localhost:8080> (`GATEWAY_PORT` in `.env`).
 The RabbitMQ management UI is at <http://localhost:15672>.
+Grafana is at <http://localhost:3000> (login from `.env`) with Prometheus and
+Loki already provisioned as datasources; Prometheus is at <http://localhost:9090>.
 Run `make` to list all available targets.
 
 ## API gateway
