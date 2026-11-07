@@ -2,7 +2,7 @@
 
 COMPOSE := docker compose
 
-.PHONY: help up down reset logs ps psql lint fmt test
+.PHONY: help up down reset logs ps psql lint fmt test sqlc
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-8s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -37,3 +37,6 @@ fmt: ## Format code (gofmt + goimports)
 
 test: ## Run tests with the race detector
 	go test -race ./...
+
+sqlc: ## Generate Go code from SQL queries
+	@for f in services/*/sqlc.yaml; do (cd $$(dirname $$f) && go tool sqlc generate) || exit 1; done
