@@ -74,6 +74,11 @@ services:
       args:
         SERVICE: auth
     restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://auth_svc:${AUTH_DB_PASSWORD:?set AUTH_DB_PASSWORD in .env}@postgres:5432/auth
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "/app", "-healthcheck"]
       interval: 10s

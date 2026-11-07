@@ -2,14 +2,38 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
+
+	"github.com/r-mcdougall/gotravel/internal/platform/dbtest"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(runTests(m))
+}
+
+func runTests(m *testing.M) int {
+	url, terminate, err := dbtest.Start(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer terminate()
+
+	if err := os.Setenv("DATABASE_URL", url); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return m.Run()
+}
 
 func freeAddr(t *testing.T) string {
 	t.Helper()
@@ -51,7 +75,7 @@ func startService(t *testing.T) (addr string, stop func() error) {
 	require.Eventually(t, func() bool {
 		code, _ := fetch(t, "http://"+addr+"/healthz")
 		return code == http.StatusOK
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 10*time.Second, 10*time.Millisecond)
 
 	return addr, func() error {
 		cancel()
@@ -106,6 +130,40 @@ func TestRun_failsOnInvalidConfig(t *testing.T) {
 	err := run(t.Context(), nil, io.Discard)
 
 	require.ErrorContains(t, err, "SHUTDOWN_TIMEOUT")
+}
+
+func TestRun_appliesMigrationsOnStart(t *testing.T) {
+	_, stop := startService(t)
+
+	conn, err := pgx.Connect(t.Context(), os.Getenv("DATABASE_URL"))
+	require.NoError(t, err)
+	defer func() { _ = conn.Close(t.Context()) }()
+
+	var tables int
+	err = conn.QueryRow(t.Context(),
+		`SELECT count(*) FROM information_schema.tables
+		 WHERE table_schema = 'public' AND table_name IN ('users', 'refresh_tokens')`,
+	).Scan(&tables)
+	require.NoError(t, err)
+	require.Equal(t, 2, tables)
+
+	require.NoError(t, stop())
+}
+
+func TestRun_failsWithoutDatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "DATABASE_URL is required")
+}
+
+func TestRun_failsWhenDatabaseIsUnreachable(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://auth_svc:x@127.0.0.1:1/auth")
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "apply migrations")
 }
 
 func TestRun_failsOnInvalidLogLevel(t *testing.T) {

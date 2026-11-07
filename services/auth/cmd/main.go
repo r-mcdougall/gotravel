@@ -12,10 +12,12 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/r-mcdougall/gotravel/internal/platform/config"
+	"github.com/r-mcdougall/gotravel/internal/platform/database"
 	"github.com/r-mcdougall/gotravel/internal/platform/health"
 	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
 	"github.com/r-mcdougall/gotravel/internal/platform/logging"
 	"github.com/r-mcdougall/gotravel/internal/platform/metrics"
+	"github.com/r-mcdougall/gotravel/services/auth/migrations"
 )
 
 const serviceName = "auth"
@@ -39,6 +41,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 
 	var loader config.Loader
 	base := config.LoadBase(&loader)
+	databaseURL := loader.Required("DATABASE_URL")
 
 	if *healthCheck {
 		return health.Probe(ctx, base.HTTPAddr)
@@ -49,6 +52,10 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 
 	log, err := logging.New(stdout, serviceName, base.LogLevel)
 	if err != nil {
+		return err
+	}
+
+	if err = database.Migrate(ctx, log, databaseURL, migrations.FS); err != nil {
 		return err
 	}
 
