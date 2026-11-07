@@ -1,8 +1,9 @@
 .DEFAULT_GOAL := help
 
 COMPOSE := docker compose
+JWT_PRIVATE_KEY_FILE := deploy/keys/jwt_private.pem
 
-.PHONY: help up down reset logs ps psql lint fmt test sqlc
+.PHONY: help up down reset logs ps psql lint fmt test sqlc keys
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-8s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -11,7 +12,7 @@ help: ## Show available targets
 	cp .env.example .env
 	@echo "Created .env from .env.example; review it before continuing."
 
-up: .env ## Start all services in the background
+up: .env keys ## Start all services in the background
 	$(COMPOSE) up -d --build --wait
 
 down: ## Stop all services
@@ -40,3 +41,6 @@ test: ## Run tests with the race detector
 
 sqlc: ## Generate Go code from SQL queries
 	@for f in services/*/sqlc.yaml; do (cd $$(dirname $$f) && go tool sqlc generate) || exit 1; done
+
+keys: ## Generate JWT signing keys in deploy/keys
+	@test -f $(JWT_PRIVATE_KEY_FILE) || go run ./tools/keygen
