@@ -42,7 +42,7 @@ paths:
                 $ref: "#/components/schemas/Error"
               example:
                 error:
-                  code: email_taken
+                  code: EMAIL_TAKEN
                   message: email is already registered
         "500":
           $ref: "#/components/responses/InternalError"
@@ -76,7 +76,7 @@ paths:
                 $ref: "#/components/schemas/Error"
               example:
                 error:
-                  code: invalid_credentials
+                  code: INVALID_CREDENTIALS
                   message: invalid email or password
         "500":
           $ref: "#/components/responses/InternalError"
@@ -114,7 +114,7 @@ paths:
                 $ref: "#/components/schemas/Error"
               example:
                 error:
-                  code: invalid_refresh_token
+                  code: INVALID_REFRESH_TOKEN
                   message: refresh token is invalid or expired
         "500":
           $ref: "#/components/responses/InternalError"
@@ -205,7 +205,7 @@ components:
             $ref: "#/components/schemas/Error"
           example:
             error:
-              code: validation_error
+              code: VALIDATION_ERROR
               message: request validation failed
               details:
                 - field: email
@@ -218,7 +218,7 @@ components:
             $ref: "#/components/schemas/Error"
           example:
             error:
-              code: unauthorized
+              code: UNAUTHORIZED
               message: missing or invalid access token
     InternalError:
       description: Unexpected server error.
@@ -228,7 +228,7 @@ components:
             $ref: "#/components/schemas/Error"
           example:
             error:
-              code: internal_error
+              code: INTERNAL_ERROR
               message: internal server error
 
   schemas:
@@ -356,19 +356,19 @@ components:
             code:
               type: string
               enum:
-                - validation_error
-                - email_taken
-                - invalid_credentials
-                - invalid_refresh_token
-                - unauthorized
-                - forbidden
-                - not_found
-                - internal_error
+                - VALIDATION_ERROR
+                - EMAIL_TAKEN
+                - INVALID_CREDENTIALS
+                - INVALID_REFRESH_TOKEN
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - NOT_FOUND
+                - INTERNAL_ERROR
             message:
               type: string
             details:
               type: array
-              description: Present on validation_error only.
+              description: Present on VALIDATION_ERROR only.
               items:
                 type: object
                 required: [field, message]
