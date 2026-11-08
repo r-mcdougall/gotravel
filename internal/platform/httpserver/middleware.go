@@ -99,14 +99,15 @@ func Recoverer(log *slog.Logger) func(http.Handler) http.Handler {
 					slog.String("panic", fmt.Sprint(rec)),
 					slog.String("stack", string(debug.Stack())),
 				)
-				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
+				WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
 			}()
 			next.ServeHTTP(w, r)
 		})
 	}
 }
 
-func writeError(w http.ResponseWriter, status int, code, message string) {
+// WriteError writes the JSON error body shared by all services.
+func WriteError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{

@@ -15,7 +15,7 @@ func NewRouter(log *slog.Logger, m *metrics.Metrics, routes func(router chi.Rout
 
 	root := chi.NewRouter()
 	root.NotFound(stack.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "route not found")
+		WriteError(w, http.StatusNotFound, "NOT_FOUND", "route not found")
 	}).ServeHTTP)
 	root.Get("/healthz", health.Handler)
 	root.Handle("/metrics", m.Handler())
