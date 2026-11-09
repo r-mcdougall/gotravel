@@ -11,6 +11,10 @@ tags:
   - name: auth
   - name: users
 
+servers:
+  - url: http://localhost:8080
+    description: Local gateway
+
 paths:
   /api/v1/auth/register:
     post:
