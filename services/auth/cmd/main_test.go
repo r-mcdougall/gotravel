@@ -2,17 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
+	"github.com/r-mcdougall/gotravel/internal/platform/authn"
 	"github.com/r-mcdougall/gotravel/internal/platform/dbtest"
 )
 
@@ -28,9 +32,29 @@ func runTests(m *testing.M) int {
 	}
 	defer terminate()
 
-	if err := os.Setenv("DATABASE_URL", url); err != nil {
+	keyDir, err := os.MkdirTemp("", "auth-test-keys")
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
+	}
+	defer func() { _ = os.RemoveAll(keyDir) }()
+
+	privatePEM, _, err := authn.GenerateKeyPair()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	keyFile := filepath.Join(keyDir, "jwt_private.pem")
+	if err := os.WriteFile(keyFile, privatePEM, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	for key, value := range map[string]string{"DATABASE_URL": url, "JWT_PRIVATE_KEY_FILE": keyFile} {
+		if err := os.Setenv(key, value); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
 	}
 	return m.Run()
 }
@@ -59,6 +83,18 @@ func fetch(t *testing.T, url string) (int, string) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	return resp.StatusCode, string(body)
+}
+
+func postJSON(t *testing.T, url, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader(body))
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(respBody)
 }
 
 // startService runs the service on a free port and waits until it is healthy.
@@ -172,4 +208,71 @@ func TestRun_failsOnInvalidLogLevel(t *testing.T) {
 	err := run(t.Context(), nil, io.Discard)
 
 	require.ErrorContains(t, err, "invalid log level")
+}
+
+func TestRun_failsWithoutJWTPrivateKeyFile(t *testing.T) {
+	t.Setenv("JWT_PRIVATE_KEY_FILE", "")
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "JWT_PRIVATE_KEY_FILE is required")
+}
+
+func TestRun_failsWhenJWTPrivateKeyFileIsMissing(t *testing.T) {
+	t.Setenv("JWT_PRIVATE_KEY_FILE", filepath.Join(t.TempDir(), "missing.pem"))
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "load jwt private key")
+}
+
+func TestRun_failsWhenJWTPrivateKeyFileIsNotAKey(t *testing.T) {
+	notAKey := filepath.Join(t.TempDir(), "garbage.pem")
+	require.NoError(t, os.WriteFile(notAKey, []byte("not a pem file"), 0o600))
+	t.Setenv("JWT_PRIVATE_KEY_FILE", notAKey)
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "load jwt private key")
+}
+
+func TestRun_failsOnNonPositiveTokenTTL(t *testing.T) {
+	for _, name := range []string{"ACCESS_TOKEN_TTL", "REFRESH_TOKEN_TTL"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "0s")
+
+			err := run(t.Context(), nil, io.Discard)
+
+			require.ErrorContains(t, err, "must be positive")
+		})
+	}
+}
+
+func TestRun_failsOnInvalidTokenTTL(t *testing.T) {
+	t.Setenv("ACCESS_TOKEN_TTL", "soon")
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "ACCESS_TOKEN_TTL")
+}
+
+func TestRun_registersAndLogsInThroughTheRouter(t *testing.T) {
+	addr, stop := startService(t)
+	base := "http://" + addr
+	email := fmt.Sprintf("john.doe.%d@example.com", time.Now().UnixNano())
+	credentials := fmt.Sprintf(`{"email":%q,"password":"correct horse battery"}`, email)
+
+	code, body := postJSON(t, base+"/api/v1/auth/register",
+		fmt.Sprintf(`{"email":%q,"password":"correct horse battery","full_name":"John Doe"}`, email))
+	require.Equal(t, http.StatusCreated, code, body)
+
+	code, body = postJSON(t, base+"/api/v1/auth/login", credentials)
+	require.Equal(t, http.StatusOK, code, body)
+	var pair struct {
+		AccessToken string `json:"access_token"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &pair))
+	require.NotEmpty(t, pair.AccessToken)
+
+	require.NoError(t, stop())
 }
