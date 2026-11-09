@@ -91,6 +91,24 @@ services:
       retries: 3
       start_period: 5s
 
+  catalog:
+    build:
+      context: .
+      args:
+        SERVICE: catalog
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://catalog_svc:${CATALOG_DB_PASSWORD:?set CATALOG_DB_PASSWORD in .env}@postgres:5432/catalog
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
   prometheus:
     image: prom/prometheus:v3.16.0
     restart: unless-stopped
