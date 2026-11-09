@@ -125,3 +125,19 @@ func TestMigrate_rejectsInvalidURL(t *testing.T) {
 
 	require.ErrorContains(t, err, "parse database url")
 }
+
+func TestConnect_returnsUsablePool(t *testing.T) {
+	pool, err := database.Connect(t.Context(), newDatabase(t))
+	require.NoError(t, err)
+	defer pool.Close()
+
+	var one int
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT 1").Scan(&one))
+	require.Equal(t, 1, one)
+}
+
+func TestConnect_failsWhenDatabaseIsUnreachable(t *testing.T) {
+	_, err := database.Connect(t.Context(), "postgres://x:y@127.0.0.1:1/z")
+
+	require.ErrorContains(t, err, "ping database")
+}
