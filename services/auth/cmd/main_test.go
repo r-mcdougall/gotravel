@@ -276,3 +276,25 @@ func TestRun_registersAndLogsInThroughTheRouter(t *testing.T) {
 
 	require.NoError(t, stop())
 }
+
+func TestRun_failsOnInvalidAdminCredentials(t *testing.T) {
+	t.Setenv("ADMIN_EMAIL", "admin@example.com")
+	t.Setenv("ADMIN_PASSWORD", "short")
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "bootstrap admin")
+}
+
+func TestRun_createsAdminFromEnvironment(t *testing.T) {
+	email := fmt.Sprintf("admin.%d@example.com", time.Now().UnixNano())
+	t.Setenv("ADMIN_EMAIL", email)
+	t.Setenv("ADMIN_PASSWORD", "correct horse battery")
+	addr, stop := startService(t)
+
+	code, body := postJSON(t, "http://"+addr+"/api/v1/auth/login",
+		fmt.Sprintf(`{"email":%q,"password":"correct horse battery"}`, email))
+
+	require.Equal(t, http.StatusOK, code, body)
+	require.NoError(t, stop())
+}

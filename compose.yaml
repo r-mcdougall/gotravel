@@ -77,6 +77,8 @@ services:
     environment:
       DATABASE_URL: postgres://auth_svc:${AUTH_DB_PASSWORD:?set AUTH_DB_PASSWORD in .env}@postgres:5432/auth
       JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private_key
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     secrets:
       - jwt_private_key
     depends_on:

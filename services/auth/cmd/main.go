@@ -85,7 +85,12 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	defer pool.Close()
 
-	service := auth.NewService(auth.NewPgStore(pool), token.NewIssuer(privateKey, accessTTL), refreshTTL)
+	pgStore := auth.NewPgStore(pool)
+	if err = auth.BootstrapAdmin(ctx, pgStore, log, os.Getenv("ADMIN_EMAIL"), os.Getenv("ADMIN_PASSWORD")); err != nil {
+		return fmt.Errorf("bootstrap admin: %w", err)
+	}
+
+	service := auth.NewService(pgStore, token.NewIssuer(privateKey, accessTTL), refreshTTL)
 	handler := auth.NewHandler(service, log, authn.NewVerifier(privateKey.Public().(ed25519.PublicKey)))
 
 	router := httpserver.NewRouter(log, metrics.New(), handler.Routes)
