@@ -12,23 +12,6 @@ var (
 	wita = time.FixedZone("WITA", 8*60*60)
 )
 
-func ptr[T any](v T) *T {
-	return &v
-}
-
-func invalidFields(t *testing.T, err error) []string {
-	t.Helper()
-
-	var validationErr *ValidationError
-	require.ErrorAs(t, err, &validationErr)
-
-	fields := make([]string, len(validationErr.Details))
-	for i, detail := range validationErr.Details {
-		fields[i] = detail.Field
-	}
-	return fields
-}
-
 func validCreateRequest() CreateFlightRequest {
 	return CreateFlightRequest{
 		FlightNumber:    "GA410",
