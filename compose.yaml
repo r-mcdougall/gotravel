@@ -99,6 +99,9 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://catalog_svc:${CATALOG_DB_PASSWORD:?set CATALOG_DB_PASSWORD in .env}@postgres:5432/catalog
+      JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public_key
+    secrets:
+      - jwt_public_key
     depends_on:
       postgres:
         condition: service_healthy
@@ -185,6 +188,8 @@ services:
 secrets:
   jwt_private_key:
     file: ./deploy/keys/jwt_private.pem
+  jwt_public_key:
+    file: ./deploy/keys/jwt_public.pem
 
 volumes:
   postgres-data:
