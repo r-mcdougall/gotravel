@@ -2,21 +2,29 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/r-mcdougall/gotravel/internal/platform/authn"
 	"github.com/r-mcdougall/gotravel/internal/platform/dbtest"
 )
+
+// testSigningKey signs the tokens the tests send; its public half is what the
+// service under test loads from JWT_PUBLIC_KEY_FILE.
+var testSigningKey ed25519.PrivateKey
 
 func TestMain(m *testing.M) {
 	os.Exit(runTests(m))
@@ -37,7 +45,12 @@ func runTests(m *testing.M) int {
 	}
 	defer func() { _ = os.RemoveAll(keyDir) }()
 
-	_, publicPEM, err := authn.GenerateKeyPair()
+	privatePEM, publicPEM, err := authn.GenerateKeyPair()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	testSigningKey, err = authn.ParsePrivateKey(privatePEM)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -234,4 +247,204 @@ func TestRun_failsWhenJWTPublicKeyFileIsNotAKey(t *testing.T) {
 	err := run(t.Context(), nil, io.Discard)
 
 	require.ErrorContains(t, err, "load jwt public key")
+}
+
+func send(t *testing.T, method, url, token, body string) (int, string) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
+	require.NoError(t, err)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(respBody)
+}
+
+func signToken(t *testing.T, key ed25519.PrivateKey, role string, expiresAt time.Time) string {
+	t.Helper()
+
+	claims := authn.AccessClaims{
+		Role: role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    authn.IssuerName,
+			Subject:   "00000000-0000-4000-8000-000000000001",
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+		},
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(key)
+	require.NoError(t, err)
+	return signed
+}
+
+func truncateFlights(t *testing.T) {
+	t.Helper()
+	conn, err := pgx.Connect(t.Context(), os.Getenv("DATABASE_URL"))
+	require.NoError(t, err)
+	defer func() { _ = conn.Close(t.Context()) }()
+
+	_, err = conn.Exec(t.Context(), "TRUNCATE flights, outbox")
+	require.NoError(t, err)
+}
+
+func errorCode(t *testing.T, body string) string {
+	t.Helper()
+	var parsed struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &parsed), body)
+	return parsed.Error.Code
+}
+
+func TestRun_adminEndpointsRequireAnAdminToken(t *testing.T) {
+	addr, stop := startService(t)
+
+	otherPrivatePEM, _, err := authn.GenerateKeyPair()
+	require.NoError(t, err)
+	otherKey, err := authn.ParsePrivateKey(otherPrivatePEM)
+	require.NoError(t, err)
+
+	inAnHour := time.Now().Add(time.Hour)
+	credentials := []struct {
+		name       string
+		token      string
+		wantStatus int
+		wantCode   string
+	}{
+		{"no token", "", http.StatusUnauthorized, "UNAUTHORIZED"},
+		{"malformed token", "not-a-jwt", http.StatusUnauthorized, "UNAUTHORIZED"},
+		{"expired admin token", signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(-time.Hour)), http.StatusUnauthorized, "UNAUTHORIZED"},
+		{"admin token signed by another key", signToken(t, otherKey, authn.RoleAdmin, inAnHour), http.StatusUnauthorized, "UNAUTHORIZED"},
+		{"user token", signToken(t, testSigningKey, authn.RoleUser, inAnHour), http.StatusForbidden, "FORBIDDEN"},
+	}
+
+	const id = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/admin/flights"},
+		{http.MethodPost, "/api/v1/admin/flights"},
+		{http.MethodGet, "/api/v1/admin/flights/" + id},
+		{http.MethodPatch, "/api/v1/admin/flights/" + id},
+	}
+
+	for _, route := range routes {
+		for _, credential := range credentials {
+			t.Run(route.method+" "+route.path+" with "+credential.name, func(t *testing.T) {
+				code, body := send(t, route.method, "http://"+addr+route.path, credential.token, `{}`)
+
+				require.Equal(t, credential.wantStatus, code, body)
+				require.Equal(t, credential.wantCode, errorCode(t, body))
+			})
+		}
+	}
+
+	require.NoError(t, stop())
+}
+
+func TestRun_adminManagesAFlightEndToEnd(t *testing.T) {
+	truncateFlights(t)
+	addr, stop := startService(t)
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	flights := "http://" + addr + "/api/v1/admin/flights"
+
+	type flight struct {
+		ID           string `json:"id"`
+		FlightNumber string `json:"flight_number"`
+		Airline      struct {
+			Code string `json:"code"`
+			Name string `json:"name"`
+		} `json:"airline"`
+		Origin struct {
+			Code string `json:"code"`
+			City string `json:"city"`
+		} `json:"origin"`
+		DepartureAt     string `json:"departure_at"`
+		ArrivalAt       string `json:"arrival_at"`
+		DurationMinutes int    `json:"duration_minutes"`
+		Price           int64  `json:"price"`
+		Capacity        int32  `json:"capacity"`
+		AvailableSeats  int32  `json:"available_seats"`
+	}
+	type flightList struct {
+		Data []flight `json:"data"`
+		Meta struct {
+			Page     int32 `json:"page"`
+			PageSize int32 `json:"page_size"`
+			Total    int64 `json:"total"`
+		} `json:"meta"`
+	}
+
+	const createBody = `{
+		"flight_number": "GA410", "airline_code": "GA",
+		"origin_code": "CGK", "destination_code": "DPS",
+		"departure_at": "2027-03-15T06:00:00+07:00",
+		"arrival_at": "2027-03-15T08:55:00+08:00",
+		"price": 1250000, "capacity": 180
+	}`
+
+	code, body := send(t, http.MethodPost, flights, admin, createBody)
+	require.Equal(t, http.StatusCreated, code, body)
+	var created flight
+	require.NoError(t, json.Unmarshal([]byte(body), &created))
+	require.NotEmpty(t, created.ID)
+	require.Equal(t, "Garuda Indonesia", created.Airline.Name, "reference data is loaded")
+	require.Equal(t, "Jakarta", created.Origin.City)
+	require.Equal(t, "2027-03-15T06:00:00+07:00", created.DepartureAt, "times use the airport's own offset")
+	require.Equal(t, "2027-03-15T08:55:00+08:00", created.ArrivalAt)
+	require.Equal(t, 115, created.DurationMinutes)
+	require.Equal(t, int32(180), created.AvailableSeats)
+
+	code, body = send(t, http.MethodPost, flights, admin, createBody)
+	require.Equal(t, http.StatusConflict, code, body)
+	require.Equal(t, "FLIGHT_EXISTS", errorCode(t, body))
+
+	code, fetched := send(t, http.MethodGet, flights+"/"+created.ID, admin, "")
+	require.Equal(t, http.StatusOK, code, fetched)
+	var got flight
+	require.NoError(t, json.Unmarshal([]byte(fetched), &got))
+	require.Equal(t, created, got)
+
+	code, body = send(t, http.MethodPatch, flights+"/"+created.ID, admin, `{"price": 900000}`)
+	require.Equal(t, http.StatusOK, code, body)
+	var updated flight
+	require.NoError(t, json.Unmarshal([]byte(body), &updated))
+	require.Equal(t, int64(900_000), updated.Price)
+	require.Equal(t, created.ID, updated.ID)
+
+	code, body = send(t, http.MethodGet, flights+"?origin=CGK&destination=DPS&date=2027-03-15", admin, "")
+	require.Equal(t, http.StatusOK, code, body)
+	var list flightList
+	require.NoError(t, json.Unmarshal([]byte(body), &list))
+	require.Equal(t, int64(1), list.Meta.Total)
+	require.Equal(t, int32(20), list.Meta.PageSize, "default page size")
+	require.Len(t, list.Data, 1)
+	require.Equal(t, updated, list.Data[0])
+
+	code, body = send(t, http.MethodGet, flights+"?date=2027-03-16", admin, "")
+	require.Equal(t, http.StatusOK, code, body)
+	require.Contains(t, body, `"data":[]`)
+
+	code, body = send(t, http.MethodGet, flights+"?date=15-03-2027", admin, "")
+	require.Equal(t, http.StatusBadRequest, code, body)
+	require.Equal(t, "VALIDATION_ERROR", errorCode(t, body))
+
+	for _, id := range []string{"6a1c0e55-1c7e-4c63-9a52-0b1d6b0f2d3e", "not-a-uuid"} {
+		code, body = send(t, http.MethodGet, flights+"/"+id, admin, "")
+		require.Equal(t, http.StatusNotFound, code, body)
+		require.Equal(t, "NOT_FOUND", errorCode(t, body))
+	}
+
+	require.Equal(t, 2, queryCount(t, `SELECT count(*) FROM outbox WHERE event_type = 'flight.changed'`), "one event for the create, one for the update")
+
+	require.NoError(t, stop())
 }
