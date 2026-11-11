@@ -76,8 +76,58 @@ func (r *ListFlightsRequest) Validate() error {
 
 	v.check(r.Origin == "" || airportCodePattern.MatchString(r.Origin), "origin", airportCodeMessage)
 	v.check(r.Destination == "" || airportCodePattern.MatchString(r.Destination), "destination", airportCodeMessage)
-	v.check(r.Page >= 1 && r.Page <= maxPage, "page", "must be between 1 and 1000000")
-	v.check(r.PageSize >= 1 && r.PageSize <= maxPageSize, "page_size", "must be between 1 and 100")
+	checkPaging(&v, r.Page, r.PageSize)
+
+	return v.err()
+}
+
+// SearchFlightsRequest holds already parsed query parameters, with every
+// default applied: Passengers is at least 1, Sort is set, and Page and
+// PageSize are set. Date is the local departure date at the origin airport as
+// midnight UTC, and zero means it was not sent. The departure bounds are
+// offsets from local midnight at the origin airport.
+type SearchFlightsRequest struct {
+	Origin        string
+	Destination   string
+	Date          time.Time
+	Passengers    int32
+	Airlines      []string
+	MinPrice      *int64
+	MaxPrice      *int64
+	DepartureFrom *time.Duration
+	DepartureTo   *time.Duration
+	Sort          string
+	Page          int32
+	PageSize      int32
+}
+
+func (r *SearchFlightsRequest) Validate() error {
+	var v ValidationError
+
+	v.check(airportCodePattern.MatchString(r.Origin), "origin", airportCodeMessage)
+	v.check(airportCodePattern.MatchString(r.Destination), "destination", airportCodeMessage)
+	sameAirport := r.Origin == r.Destination && airportCodePattern.MatchString(r.Origin)
+	v.check(!sameAirport, "destination", "must differ from origin")
+	v.check(!r.Date.IsZero(), "date", "is required")
+	v.check(r.Passengers >= 1 && r.Passengers <= maxPassengers, "passengers", "must be between 1 and 9")
+
+	for _, code := range r.Airlines {
+		if !airlineCodePattern.MatchString(code) {
+			v.check(false, "airlines", airlineCodeMessage)
+			break
+		}
+	}
+
+	v.check(r.MinPrice == nil || *r.MinPrice >= 0, "min_price", "must not be negative")
+	v.check(r.MaxPrice == nil || *r.MaxPrice >= 0, "max_price", "must not be negative")
+	v.check(r.MinPrice == nil || r.MaxPrice == nil || *r.MinPrice <= *r.MaxPrice, "max_price", "must not be lower than min_price")
+
+	v.check(r.DepartureFrom == nil || validTimeOfDay(*r.DepartureFrom), "departure_from", timeOfDayMessage)
+	v.check(r.DepartureTo == nil || validTimeOfDay(*r.DepartureTo), "departure_to", timeOfDayMessage)
+	v.check(r.DepartureFrom == nil || r.DepartureTo == nil || *r.DepartureFrom <= *r.DepartureTo, "departure_to", "must not be before departure_from")
+
+	v.check(validSort(r.Sort), "sort", "must be one of departure_asc, departure_desc, price_asc, price_desc")
+	checkPaging(&v, r.Page, r.PageSize)
 
 	return v.err()
 }
@@ -91,6 +141,24 @@ type AirportResponse struct {
 	Code string `json:"code"`
 	Name string `json:"name"`
 	City string `json:"city"`
+}
+
+type FlightResponse struct {
+	ID              string          `json:"id"`
+	FlightNumber    string          `json:"flight_number"`
+	Airline         AirlineResponse `json:"airline"`
+	Origin          AirportResponse `json:"origin"`
+	Destination     AirportResponse `json:"destination"`
+	DepartureAt     time.Time       `json:"departure_at"`
+	ArrivalAt       time.Time       `json:"arrival_at"`
+	DurationMinutes int             `json:"duration_minutes"`
+	Price           int64           `json:"price"`
+	AvailableSeats  int32           `json:"available_seats"`
+}
+
+type FlightListResponse struct {
+	Data []FlightResponse `json:"data"`
+	Meta PageMeta         `json:"meta"`
 }
 
 type AdminFlightResponse struct {

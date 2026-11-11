@@ -172,3 +172,152 @@ func TestListFlightsRequestValidate_rejectsASingleInvalidField(t *testing.T) {
 		})
 	}
 }
+
+func validSearchRequest() SearchFlightsRequest {
+	return SearchFlightsRequest{
+		Origin:      "CGK",
+		Destination: "DPS",
+		Date:        time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC),
+		Passengers:  1,
+		Sort:        sortDepartureAsc,
+		Page:        defaultPage,
+		PageSize:    defaultPageSize,
+	}
+}
+
+func TestSearchFlightsRequestValidate_acceptsAValidRequest(t *testing.T) {
+	request := validSearchRequest()
+
+	require.NoError(t, request.Validate())
+}
+
+func TestSearchFlightsRequestValidate_acceptsEveryFilterAndTheLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(r *SearchFlightsRequest)
+	}{
+		{"every filter", func(r *SearchFlightsRequest) {
+			r.Passengers = 4
+			r.Airlines = []string{"GA", "JT"}
+			r.MinPrice = ptr(int64(500_000))
+			r.MaxPrice = ptr(int64(2_000_000))
+			r.DepartureFrom = ptr(6 * time.Hour)
+			r.DepartureTo = ptr(18*time.Hour + 30*time.Minute)
+			r.Sort = sortPriceDesc
+			r.Page = 3
+			r.PageSize = 50
+		}},
+		{"most passengers", func(r *SearchFlightsRequest) { r.Passengers = maxPassengers }},
+		{"zero prices", func(r *SearchFlightsRequest) {
+			r.MinPrice = ptr(int64(0))
+			r.MaxPrice = ptr(int64(0))
+		}},
+		{"same minimum and maximum price", func(r *SearchFlightsRequest) {
+			r.MinPrice = ptr(int64(900_000))
+			r.MaxPrice = ptr(int64(900_000))
+		}},
+		{"whole day", func(r *SearchFlightsRequest) {
+			r.DepartureFrom = ptr(time.Duration(0))
+			r.DepartureTo = ptr(23*time.Hour + 59*time.Minute)
+		}},
+		{"same earliest and latest departure", func(r *SearchFlightsRequest) {
+			r.DepartureFrom = ptr(9 * time.Hour)
+			r.DepartureTo = ptr(9 * time.Hour)
+		}},
+		{"largest page and page size", func(r *SearchFlightsRequest) {
+			r.Page = maxPage
+			r.PageSize = maxPageSize
+		}},
+		{"sort by departure descending", func(r *SearchFlightsRequest) { r.Sort = sortDepartureDesc }},
+		{"sort by price ascending", func(r *SearchFlightsRequest) { r.Sort = sortPriceAsc }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validSearchRequest()
+			tc.mutate(&request)
+
+			require.NoError(t, request.Validate())
+		})
+	}
+}
+
+func TestSearchFlightsRequestValidate_rejectsASingleInvalidField(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(r *SearchFlightsRequest)
+		field  string
+	}{
+		{"missing origin", func(r *SearchFlightsRequest) { r.Origin = "" }, "origin"},
+		{"lower case origin", func(r *SearchFlightsRequest) { r.Origin = "cgk" }, "origin"},
+		{"missing destination", func(r *SearchFlightsRequest) { r.Destination = "" }, "destination"},
+		{"destination with four letters", func(r *SearchFlightsRequest) { r.Destination = "DPSX" }, "destination"},
+		{"destination equals origin", func(r *SearchFlightsRequest) { r.Destination = "CGK" }, "destination"},
+		{"missing date", func(r *SearchFlightsRequest) { r.Date = time.Time{} }, "date"},
+		{"no passengers", func(r *SearchFlightsRequest) { r.Passengers = 0 }, "passengers"},
+		{"too many passengers", func(r *SearchFlightsRequest) { r.Passengers = maxPassengers + 1 }, "passengers"},
+		{"lower case airline", func(r *SearchFlightsRequest) { r.Airlines = []string{"GA", "jt"} }, "airlines"},
+		{"empty airline code", func(r *SearchFlightsRequest) { r.Airlines = []string{""} }, "airlines"},
+		{"negative minimum price", func(r *SearchFlightsRequest) { r.MinPrice = ptr(int64(-1)) }, "min_price"},
+		{"negative maximum price", func(r *SearchFlightsRequest) { r.MaxPrice = ptr(int64(-1)) }, "max_price"},
+		{"minimum price above maximum", func(r *SearchFlightsRequest) {
+			r.MinPrice = ptr(int64(900_001))
+			r.MaxPrice = ptr(int64(900_000))
+		}, "max_price"},
+		{"earliest departure at 24:00", func(r *SearchFlightsRequest) { r.DepartureFrom = ptr(24 * time.Hour) }, "departure_from"},
+		{"negative earliest departure", func(r *SearchFlightsRequest) { r.DepartureFrom = ptr(-time.Minute) }, "departure_from"},
+		{"latest departure at 24:00", func(r *SearchFlightsRequest) { r.DepartureTo = ptr(24 * time.Hour) }, "departure_to"},
+		{"latest departure before earliest", func(r *SearchFlightsRequest) {
+			r.DepartureFrom = ptr(18 * time.Hour)
+			r.DepartureTo = ptr(6 * time.Hour)
+		}, "departure_to"},
+		{"unknown sort", func(r *SearchFlightsRequest) { r.Sort = "cheapest" }, "sort"},
+		{"empty sort", func(r *SearchFlightsRequest) { r.Sort = "" }, "sort"},
+		{"page zero", func(r *SearchFlightsRequest) { r.Page = 0 }, "page"},
+		{"page above the limit", func(r *SearchFlightsRequest) { r.Page = maxPage + 1 }, "page"},
+		{"page size zero", func(r *SearchFlightsRequest) { r.PageSize = 0 }, "page_size"},
+		{"page size above the limit", func(r *SearchFlightsRequest) { r.PageSize = maxPageSize + 1 }, "page_size"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validSearchRequest()
+			tc.mutate(&request)
+
+			err := request.Validate()
+
+			require.Equal(t, []string{tc.field}, invalidFields(t, err))
+		})
+	}
+}
+
+func TestSearchFlightsRequestValidate_reportsEveryInvalidFieldTogether(t *testing.T) {
+	request := SearchFlightsRequest{
+		Origin:        "cgk",
+		Destination:   "dps",
+		Passengers:    10,
+		Airlines:      []string{"ga"},
+		MinPrice:      ptr(int64(2)),
+		MaxPrice:      ptr(int64(1)),
+		DepartureFrom: ptr(24 * time.Hour),
+		DepartureTo:   ptr(-time.Hour),
+		Sort:          "cheapest",
+	}
+
+	err := request.Validate()
+
+	require.Equal(t, []string{
+		"origin", "destination", "date", "passengers", "airlines", "max_price",
+		"departure_from", "departure_to", "departure_to", "sort", "page", "page_size",
+	}, invalidFields(t, err))
+}
+
+func TestSearchFlightsRequestValidate_doesNotReportASameAirportWhenBothCodesAreEmpty(t *testing.T) {
+	request := validSearchRequest()
+	request.Origin = ""
+	request.Destination = ""
+
+	err := request.Validate()
+
+	require.Equal(t, []string{"origin", "destination"}, invalidFields(t, err))
+}
