@@ -96,6 +96,9 @@ paths:
             $ref: "#/components/schemas/TimeOfDay"
         - name: sort
           in: query
+          description: >
+            Flights that tie are ordered by departure time, earliest first,
+            then by id.
           schema:
             type: string
             enum: [departure_asc, departure_desc, price_asc, price_desc]
