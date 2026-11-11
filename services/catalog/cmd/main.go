@@ -8,15 +8,16 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	_ "time/tzdata" // airport time zones must resolve in the distroless image, which has no zoneinfo
 
-	"github.com/go-chi/chi/v5"
-
+	"github.com/r-mcdougall/gotravel/internal/platform/authn"
 	"github.com/r-mcdougall/gotravel/internal/platform/config"
 	"github.com/r-mcdougall/gotravel/internal/platform/database"
 	"github.com/r-mcdougall/gotravel/internal/platform/health"
 	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
 	"github.com/r-mcdougall/gotravel/internal/platform/logging"
 	"github.com/r-mcdougall/gotravel/internal/platform/metrics"
+	"github.com/r-mcdougall/gotravel/services/catalog/internal/catalog"
 	"github.com/r-mcdougall/gotravel/services/catalog/migrations"
 )
 
@@ -42,6 +43,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	var loader config.Loader
 	base := config.LoadBase(&loader)
 	databaseURL := loader.Required("DATABASE_URL")
+	publicKeyFile := loader.Required("JWT_PUBLIC_KEY_FILE")
 
 	if *healthCheck {
 		return health.Probe(ctx, base.HTTPAddr)
@@ -55,6 +57,11 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 
+	publicKey, err := authn.LoadPublicKey(publicKeyFile)
+	if err != nil {
+		return fmt.Errorf("load jwt public key: %w", err)
+	}
+
 	if err = database.Migrate(ctx, log, databaseURL, migrations.FS); err != nil {
 		return err
 	}
@@ -65,6 +72,15 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	defer pool.Close()
 
-	router := httpserver.NewRouter(log, metrics.New(), func(chi.Router) {})
+	pgStore := catalog.NewPgStore(pool)
+	reference, err := catalog.LoadReference(ctx, pgStore)
+	if err != nil {
+		return fmt.Errorf("load reference data: %w", err)
+	}
+
+	service := catalog.NewService(pgStore, reference)
+	handler := catalog.NewHandler(service, log, authn.NewVerifier(publicKey))
+
+	router := httpserver.NewRouter(log, metrics.New(), handler.Routes)
 	return httpserver.Run(ctx, log, httpserver.New(base.HTTPAddr, router), base.ShutdownTimeout)
 }

@@ -7,12 +7,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
+	"github.com/r-mcdougall/gotravel/internal/platform/authn"
 	"github.com/r-mcdougall/gotravel/internal/platform/dbtest"
 )
 
@@ -28,9 +30,29 @@ func runTests(m *testing.M) int {
 	}
 	defer terminate()
 
-	if err := os.Setenv("DATABASE_URL", url); err != nil {
+	keyDir, err := os.MkdirTemp("", "catalog-test-keys")
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
+	}
+	defer func() { _ = os.RemoveAll(keyDir) }()
+
+	_, publicPEM, err := authn.GenerateKeyPair()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	keyFile := filepath.Join(keyDir, "jwt_public.pem")
+	if err := os.WriteFile(keyFile, publicPEM, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	for key, value := range map[string]string{"DATABASE_URL": url, "JWT_PUBLIC_KEY_FILE": keyFile} {
+		if err := os.Setenv(key, value); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
 	}
 	return m.Run()
 }
@@ -186,4 +208,30 @@ func TestRun_failsOnInvalidLogLevel(t *testing.T) {
 	err := run(t.Context(), nil, io.Discard)
 
 	require.ErrorContains(t, err, "invalid log level")
+}
+
+func TestRun_failsWithoutJWTPublicKeyFile(t *testing.T) {
+	t.Setenv("JWT_PUBLIC_KEY_FILE", "")
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "JWT_PUBLIC_KEY_FILE is required")
+}
+
+func TestRun_failsWhenJWTPublicKeyFileIsMissing(t *testing.T) {
+	t.Setenv("JWT_PUBLIC_KEY_FILE", filepath.Join(t.TempDir(), "missing.pem"))
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "load jwt public key")
+}
+
+func TestRun_failsWhenJWTPublicKeyFileIsNotAKey(t *testing.T) {
+	notAKey := filepath.Join(t.TempDir(), "garbage.pem")
+	require.NoError(t, os.WriteFile(notAKey, []byte("not a pem file"), 0o600))
+	t.Setenv("JWT_PUBLIC_KEY_FILE", notAKey)
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "load jwt public key")
 }
