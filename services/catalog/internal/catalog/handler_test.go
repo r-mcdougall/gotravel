@@ -30,11 +30,13 @@ const createFlightBody = `{
 const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
 
 type fakeService struct {
-	t            *testing.T
-	createFlight func(ctx context.Context, request CreateFlightRequest) (AdminFlightResponse, error)
-	updateFlight func(ctx context.Context, id string, request UpdateFlightRequest) (AdminFlightResponse, error)
-	getFlight    func(ctx context.Context, id string) (AdminFlightResponse, error)
-	listFlights  func(ctx context.Context, request ListFlightsRequest) (AdminFlightListResponse, error)
+	t               *testing.T
+	createFlight    func(ctx context.Context, request CreateFlightRequest) (AdminFlightResponse, error)
+	updateFlight    func(ctx context.Context, id string, request UpdateFlightRequest) (AdminFlightResponse, error)
+	getFlight       func(ctx context.Context, id string) (AdminFlightResponse, error)
+	listFlights     func(ctx context.Context, request ListFlightsRequest) (AdminFlightListResponse, error)
+	searchFlights   func(ctx context.Context, request SearchFlightsRequest) (FlightListResponse, error)
+	getFlightDetail func(ctx context.Context, id string) (FlightResponse, error)
 }
 
 func (f *fakeService) CreateFlight(ctx context.Context, request CreateFlightRequest) (AdminFlightResponse, error) {
@@ -63,6 +65,20 @@ func (f *fakeService) ListFlights(ctx context.Context, request ListFlightsReques
 		f.t.Fatal("unexpected call to ListFlights")
 	}
 	return f.listFlights(ctx, request)
+}
+
+func (f *fakeService) SearchFlights(ctx context.Context, request SearchFlightsRequest) (FlightListResponse, error) {
+	if f.searchFlights == nil {
+		f.t.Fatal("unexpected call to SearchFlights")
+	}
+	return f.searchFlights(ctx, request)
+}
+
+func (f *fakeService) GetFlightDetail(ctx context.Context, id string) (FlightResponse, error) {
+	if f.getFlightDetail == nil {
+		f.t.Fatal("unexpected call to GetFlightDetail")
+	}
+	return f.getFlightDetail(ctx, id)
 }
 
 func validationError(field, message string) *ValidationError {
@@ -362,7 +378,8 @@ func TestListFlights_rejectsInvalidQueryParametersWithoutCallingTheService(t *te
 		{"page overflows int32", "page=99999999999", []string{"page"}},
 		{"page size is above the maximum", "page_size=101", []string{"page_size"}},
 		{"page size is zero", "page_size=0", []string{"page_size"}},
-		{"every problem is reported together", "origin=cgk&date=soon&page=0&page_size=500", []string{"date", "origin", "page", "page_size"}},
+		{"every problem is reported together", "origin=cgk&date=soon&page=0&page_size=500",
+			[]string{"date", "origin", "page", "page_size"}},
 	}
 
 	for _, tc := range tests {

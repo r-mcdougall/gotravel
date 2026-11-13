@@ -11,9 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
-
 	"github.com/r-mcdougall/gotravel/internal/platform/authn"
+	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
 )
 
 type Service interface {
@@ -21,6 +20,8 @@ type Service interface {
 	UpdateFlight(ctx context.Context, id string, request UpdateFlightRequest) (AdminFlightResponse, error)
 	GetFlight(ctx context.Context, id string) (AdminFlightResponse, error)
 	ListFlights(ctx context.Context, request ListFlightsRequest) (AdminFlightListResponse, error)
+	SearchFlights(ctx context.Context, request SearchFlightsRequest) (FlightListResponse, error)
+	GetFlightDetail(ctx context.Context, id string) (FlightResponse, error)
 }
 
 type Handler struct {

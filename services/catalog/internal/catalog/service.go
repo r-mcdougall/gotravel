@@ -23,6 +23,7 @@ type queries interface {
 	GetFlightForUpdate(ctx context.Context, id string) (store.Flight, error)
 	UpdateFlight(ctx context.Context, arg store.UpdateFlightParams) (store.Flight, error)
 	ListFlights(ctx context.Context, arg store.ListFlightsParams) ([]store.Flight, error)
+	ListFlightsByRouteDay(ctx context.Context, arg store.ListFlightsByRouteDayParams) ([]store.Flight, error)
 	CountFlights(ctx context.Context, arg store.CountFlightsParams) (int64, error)
 	InsertOutboxEvent(ctx context.Context, arg store.InsertOutboxEventParams) error
 }
@@ -37,10 +38,19 @@ type flightStore interface {
 type service struct {
 	db        flightStore
 	reference *Reference
+	now       func() time.Time
 }
 
 func NewService(db flightStore, reference *Reference) Service {
-	return &service{db: db, reference: reference}
+	return newService(db, reference, time.Now)
+}
+
+func newService(db flightStore, reference *Reference, now func() time.Time) *service {
+	return &service{
+		db:        db,
+		reference: reference,
+		now:       now,
+	}
 }
 
 func (s *service) CreateFlight(ctx context.Context, request CreateFlightRequest) (AdminFlightResponse, error) {
@@ -96,7 +106,7 @@ func (s *service) UpdateFlight(ctx context.Context, id string, request UpdateFli
 	fn := func(q queries) error {
 		current, err := q.GetFlightForUpdate(ctx, id)
 		if err != nil {
-			return ErrFlightNotFound
+			return flightQueryError("get flight for update", err)
 		}
 
 		params, err := applyUpdate(current, request)
@@ -144,24 +154,22 @@ func (s *service) ListFlights(ctx context.Context, request ListFlightsRequest) (
 	origin := nilIfEmpty(request.Origin)
 	destination := nilIfEmpty(request.Destination)
 
-	listFlightsParams := store.ListFlightsParams{
+	flights, err := s.db.ListFlights(ctx, store.ListFlightsParams{
 		OriginCode:      origin,
 		DestinationCode: destination,
 		DepartureDate:   request.Date,
 		RowOffset:       (request.Page - 1) * request.PageSize,
 		RowLimit:        request.PageSize,
-	}
-	flights, err := s.db.ListFlights(ctx, listFlightsParams)
+	})
 	if err != nil {
 		return AdminFlightListResponse{}, fmt.Errorf("list flights: %w", err)
 	}
 
-	countFlightsParams := store.CountFlightsParams{
+	total, err := s.db.CountFlights(ctx, store.CountFlightsParams{
 		OriginCode:      origin,
 		DestinationCode: destination,
 		DepartureDate:   request.Date,
-	}
-	total, err := s.db.CountFlights(ctx, countFlightsParams)
+	})
 	if err != nil {
 		return AdminFlightListResponse{}, fmt.Errorf("count flights: %w", err)
 	}
@@ -181,12 +189,86 @@ func (s *service) ListFlights(ctx context.Context, request ListFlightsRequest) (
 	}, nil
 }
 
+func (s *service) GetFlightDetail(ctx context.Context, id string) (FlightResponse, error) {
+	if !validUUID(id) {
+		return FlightResponse{}, ErrFlightNotFound
+	}
+
+	flight, err := s.db.GetFlight(ctx, id)
+	if err != nil {
+		return FlightResponse{}, flightQueryError("get flight", err)
+	}
+
+	return s.toFlightResponse(flight)
+}
+
+// SearchFlights returns the bookable flights on one route and local departure day.
+// An airport the catalog does not know has no flights, so it yields an empty page instead of an error and without touching the database.
+func (s *service) SearchFlights(ctx context.Context, request SearchFlightsRequest) (FlightListResponse, error) {
+	if err := request.Validate(); err != nil {
+		return FlightListResponse{}, fmt.Errorf("validate request: %w", err)
+	}
+
+	origin, knownOrigin := s.reference.Airport(request.Origin)
+	_, knownDestination := s.reference.Airport(request.Destination)
+	if !knownOrigin || !knownDestination {
+		return newFlightList(nil, request.Page, request.PageSize, 0), nil
+	}
+
+	flights, err := s.flightsOnRouteDay(ctx, request, origin)
+	if err != nil {
+		return FlightListResponse{}, err
+	}
+
+	page, total := searchFlights(flights, &request, origin.Location, s.now())
+
+	data := make([]FlightResponse, 0, len(page))
+	for _, flight := range page {
+		item, err := s.toFlightResponse(flight)
+		if err != nil {
+			return FlightListResponse{}, err
+		}
+		data = append(data, item)
+	}
+
+	return newFlightList(data, request.Page, request.PageSize, int64(total)), nil
+}
+
+// flightsOnRouteDay loads every flight that departs on the requested date at the origin airport's local time.
+func (s *service) flightsOnRouteDay(ctx context.Context, request SearchFlightsRequest, origin Airport) ([]store.Flight, error) {
+	year, month, day := request.Date.Date()
+	dayStart := time.Date(year, month, day, 0, 0, 0, 0, origin.Location)
+	dayEnd := time.Date(year, month, day+1, 0, 0, 0, 0, origin.Location)
+
+	flights, err := s.db.ListFlightsByRouteDay(ctx, store.ListFlightsByRouteDayParams{
+		OriginCode:      request.Origin,
+		DestinationCode: request.Destination,
+		DayStart:        dayStart,
+		DayEnd:          dayEnd,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list flights by route day: %w", err)
+	}
+
+	return flights, nil
+}
+
+func newFlightList(data []FlightResponse, page, pageSize int32, total int64) FlightListResponse {
+	if data == nil {
+		data = []FlightResponse{}
+	}
+	return FlightListResponse{
+		Data: data,
+		Meta: PageMeta{Page: page, PageSize: pageSize, Total: total},
+	}
+}
+
 func (s *service) checkReferences(request CreateFlightRequest) error {
 	var v ValidationError
 
-	_, knownAirline := s.reference.airlines[request.AirlineCode]
-	_, knownOrigin := s.reference.airports[request.OriginCode]
-	_, knownDestination := s.reference.airports[request.DestinationCode]
+	_, knownAirline := s.reference.Airline(request.AirlineCode)
+	_, knownOrigin := s.reference.Airport(request.OriginCode)
+	_, knownDestination := s.reference.Airport(request.DestinationCode)
 
 	v.check(knownAirline, "airline_code", "unknown airline")
 	v.check(knownOrigin, "origin_code", "unknown airport")
@@ -195,6 +277,7 @@ func (s *service) checkReferences(request CreateFlightRequest) error {
 	return v.err()
 }
 
+// applyUpdate merges the request into the locked row. Capacity moves available seats by the same amount, and may not push them below zero.
 func applyUpdate(current store.Flight, request UpdateFlightRequest) (store.UpdateFlightParams, error) {
 	params := store.UpdateFlightParams{
 		ID:             current.ID,
@@ -235,18 +318,30 @@ func recordFlightChanged(ctx context.Context, q queries, flight store.Flight) er
 	return nil
 }
 
+func (s *service) toFlightResponse(flight store.Flight) (FlightResponse, error) {
+	airline, origin, destination, err := s.resolve(flight)
+	if err != nil {
+		return FlightResponse{}, err
+	}
+
+	return FlightResponse{
+		ID:              flight.ID,
+		FlightNumber:    flight.FlightNumber,
+		Airline:         airline,
+		Origin:          origin.AirportResponse,
+		Destination:     destination.AirportResponse,
+		DepartureAt:     flight.DepartureAt.In(origin.Location),
+		ArrivalAt:       flight.ArrivalAt.In(destination.Location),
+		DurationMinutes: durationMinutes(flight),
+		Price:           flight.Price,
+		AvailableSeats:  flight.AvailableSeats,
+	}, nil
+}
+
 func (s *service) toAdminFlightResponse(flight store.Flight) (AdminFlightResponse, error) {
-	airline, ok := s.reference.Airline(flight.AirlineCode)
-	if !ok {
-		return AdminFlightResponse{}, fmt.Errorf("flight %s: unknown airline %q", flight.ID, flight.AirlineCode)
-	}
-	origin, ok := s.reference.Airport(flight.OriginCode)
-	if !ok {
-		return AdminFlightResponse{}, fmt.Errorf("flight %s: unknown airport %q", flight.ID, flight.OriginCode)
-	}
-	destination, ok := s.reference.Airport(flight.DestinationCode)
-	if !ok {
-		return AdminFlightResponse{}, fmt.Errorf("flight %s: unknown airport %q", flight.ID, flight.DestinationCode)
+	airline, origin, destination, err := s.resolve(flight)
+	if err != nil {
+		return AdminFlightResponse{}, err
 	}
 
 	return AdminFlightResponse{
@@ -257,13 +352,35 @@ func (s *service) toAdminFlightResponse(flight store.Flight) (AdminFlightRespons
 		Destination:     destination.AirportResponse,
 		DepartureAt:     flight.DepartureAt.In(origin.Location),
 		ArrivalAt:       flight.ArrivalAt.In(destination.Location),
-		DurationMinutes: int(flight.ArrivalAt.Sub(flight.DepartureAt) / time.Minute),
+		DurationMinutes: durationMinutes(flight),
 		Price:           flight.Price,
 		Capacity:        flight.Capacity,
 		AvailableSeats:  flight.AvailableSeats,
 		CreatedAt:       flight.CreatedAt.UTC(),
 		UpdatedAt:       flight.UpdatedAt.UTC(),
 	}, nil
+}
+
+// resolve looks up the reference data a flight row points at.
+func (s *service) resolve(flight store.Flight) (AirlineResponse, Airport, Airport, error) {
+	airline, ok := s.reference.Airline(flight.AirlineCode)
+	if !ok {
+		return AirlineResponse{}, Airport{}, Airport{}, fmt.Errorf("flight %s: unknown airline %q", flight.ID, flight.AirlineCode)
+	}
+	origin, ok := s.reference.Airport(flight.OriginCode)
+	if !ok {
+		return AirlineResponse{}, Airport{}, Airport{}, fmt.Errorf("flight %s: unknown airport %q", flight.ID, flight.OriginCode)
+	}
+	destination, ok := s.reference.Airport(flight.DestinationCode)
+	if !ok {
+		return AirlineResponse{}, Airport{}, Airport{}, fmt.Errorf("flight %s: unknown airport %q", flight.ID, flight.DestinationCode)
+	}
+
+	return airline, origin, destination, nil
+}
+
+func durationMinutes(flight store.Flight) int {
+	return int(flight.ArrivalAt.Sub(flight.DepartureAt) / time.Minute)
 }
 
 func flightQueryError(op string, err error) error {
