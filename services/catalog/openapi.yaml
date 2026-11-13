@@ -3,18 +3,153 @@ info:
   title: GoTravel Catalog API
   version: 1.0.0
   description: >
-    Flight inventory management for administrators. Public flight search is
-    documented here once it is implemented. All endpoints below require an
-    access token issued by the auth service for a user with role `admin`.
+    Flight search and detail are public. Flight inventory management lives
+    under `/api/v1/admin` and requires an access token issued by the auth
+    service for a user with role `admin`.
 
 tags:
+  - name: flights
+    description: Public flight search.
   - name: admin
+    description: Flight inventory management.
 
 servers:
   - url: http://localhost:8080
     description: Local gateway
 
 paths:
+  /api/v1/flights:
+    get:
+      tags: [flights]
+      summary: Search flights
+      description: >
+        Returns the direct, one-way flights from `origin` to `destination`
+        that depart on `date` (the calendar date at the origin airport) and
+        have not departed yet. A past date, or an airport with no flights,
+        gives an empty list. Filters combine with AND. Departure times are
+        local to the origin airport, with no wrap past midnight.
+        `available_seats` is as last reported by the booking service and can
+        lag behind new holds, so a hold is what finally reserves seats.
+      operationId: searchFlights
+      security: []
+      parameters:
+        - name: origin
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/AirportCode"
+        - name: destination
+          in: query
+          required: true
+          description: Must differ from `origin`.
+          schema:
+            $ref: "#/components/schemas/AirportCode"
+        - name: date
+          in: query
+          required: true
+          description: Local departure date at the origin airport.
+          schema:
+            type: string
+            format: date
+          example: "2026-11-20"
+        - name: passengers
+          in: query
+          description: Only flights with at least this many seats left.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 9
+            default: 1
+        - name: airlines
+          in: query
+          description: Comma separated airline codes. An unknown code matches nothing.
+          style: form
+          explode: false
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/AirlineCode"
+          example: GA,JT
+        - name: min_price
+          in: query
+          description: Lowest price per passenger in rupiah.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: max_price
+          in: query
+          description: Highest price per passenger in rupiah; not below `min_price`.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: departure_from
+          in: query
+          description: Earliest local departure time at the origin airport.
+          schema:
+            $ref: "#/components/schemas/TimeOfDay"
+        - name: departure_to
+          in: query
+          description: Latest local departure time; not before `departure_from`.
+          schema:
+            $ref: "#/components/schemas/TimeOfDay"
+        - name: sort
+          in: query
+          description: >
+            Flights that tie are ordered by departure time, earliest first,
+            then by id.
+          schema:
+            type: string
+            enum: [departure_asc, departure_desc, price_asc, price_desc]
+            default: departure_asc
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000000
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: A page of flights.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlightList"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/flights/{id}:
+    parameters:
+      - $ref: "#/components/parameters/FlightId"
+    get:
+      tags: [flights]
+      summary: Get a flight
+      description: Also returns flights that have already departed.
+      operationId: getFlight
+      security: []
+      responses:
+        "200":
+          description: The flight.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Flight"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/admin/flights:
     get:
       tags: [admin]
@@ -216,7 +351,7 @@ components:
 
   responses:
     ValidationError:
-      description: Malformed JSON, unknown field or invalid value.
+      description: Malformed JSON, unknown field, or an invalid value in the body or the query string.
       content:
         application/json:
           schema:
@@ -281,6 +416,12 @@ components:
       pattern: "^[A-Z0-9]{2}$"
       description: IATA airline code, upper case.
       example: GA
+
+    TimeOfDay:
+      type: string
+      pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+      description: Local time of day, 24 hour clock.
+      example: "06:00"
 
     CreateFlightRequest:
       type: object
@@ -381,7 +522,7 @@ components:
           type: string
           example: Jakarta
 
-    AdminFlight:
+    Flight:
       type: object
       required:
         - id
@@ -393,10 +534,7 @@ components:
         - arrival_at
         - duration_minutes
         - price
-        - capacity
         - available_seats
-        - created_at
-        - updated_at
       properties:
         id:
           type: string
@@ -428,21 +566,28 @@ components:
           format: int64
           description: Price per passenger in rupiah.
           example: 1250000
-        capacity:
-          type: integer
-          example: 180
         available_seats:
           type: integer
           description: >
             Seats still open, as last reported by the booking service. It can
             lag behind new holds.
           example: 42
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
+
+    AdminFlight:
+      allOf:
+        - $ref: "#/components/schemas/Flight"
+        - type: object
+          required: [capacity, created_at, updated_at]
+          properties:
+            capacity:
+              type: integer
+              example: 180
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
 
     PageMeta:
       type: object
@@ -455,6 +600,17 @@ components:
         total:
           type: integer
           description: Number of flights matching the filters across all pages.
+
+    FlightList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Flight"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
 
     AdminFlightList:
       type: object

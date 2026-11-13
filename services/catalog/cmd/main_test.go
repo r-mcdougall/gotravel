@@ -448,3 +448,143 @@ func TestRun_adminManagesAFlightEndToEnd(t *testing.T) {
 
 	require.NoError(t, stop())
 }
+
+func TestRun_anyoneCanSearchAndViewFlightsWithoutAToken(t *testing.T) {
+	truncateFlights(t)
+	addr, stop := startService(t)
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	adminFlights := "http://" + addr + "/api/v1/admin/flights"
+	publicFlights := "http://" + addr + "/api/v1/flights"
+
+	wib := time.FixedZone("WIB", 7*60*60)
+	wita := time.FixedZone("WITA", 8*60*60)
+	// Always a week ahead, so the flights are upcoming whenever the test runs.
+	day := time.Now().In(wib).AddDate(0, 0, 7)
+	at := func(location *time.Location, hour int) time.Time {
+		return time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, location)
+	}
+	date := day.Format(time.DateOnly)
+
+	type flight struct {
+		ID             string `json:"id"`
+		FlightNumber   string `json:"flight_number"`
+		Price          int64  `json:"price"`
+		AvailableSeats int32  `json:"available_seats"`
+		DepartureAt    string `json:"departure_at"`
+	}
+	type flightList struct {
+		Data []flight `json:"data"`
+		Meta struct {
+			Page     int32 `json:"page"`
+			PageSize int32 `json:"page_size"`
+			Total    int64 `json:"total"`
+		} `json:"meta"`
+	}
+
+	create := func(number, airline, origin, destination string, departure time.Time, price int64) flight {
+		body := fmt.Sprintf(`{
+			"flight_number": %q, "airline_code": %q,
+			"origin_code": %q, "destination_code": %q,
+			"departure_at": %q, "arrival_at": %q,
+			"price": %d, "capacity": 180
+		}`, number, airline, origin, destination,
+			departure.Format(time.RFC3339), departure.Add(2*time.Hour).Format(time.RFC3339), price)
+		code, response := send(t, http.MethodPost, adminFlights, admin, body)
+		require.Equal(t, http.StatusCreated, code, response)
+		var created flight
+		require.NoError(t, json.Unmarshal([]byte(response), &created))
+		return created
+	}
+	search := func(query string) flightList {
+		code, response := send(t, http.MethodGet, publicFlights+"?origin=CGK&destination=DPS&date="+date+query, "", "")
+		require.Equal(t, http.StatusOK, code, response)
+		var list flightList
+		require.NoError(t, json.Unmarshal([]byte(response), &list))
+		return list
+	}
+	numbers := func(list flightList) []string {
+		out := make([]string, len(list.Data))
+		for i, f := range list.Data {
+			out[i] = f.FlightNumber
+		}
+		return out
+	}
+
+	morning := create("GA410", "GA", "CGK", "DPS", at(wib, 6), 1_250_000)
+	create("JT100", "JT", "CGK", "DPS", at(wib, 10), 700_000)
+	create("GA412", "GA", "CGK", "DPS", at(wib, 22), 900_000)
+	create("GA411", "GA", "DPS", "CGK", at(wita, 10), 1_100_000) // the other direction
+
+	t.Run("lists the route's flights by departure time", func(t *testing.T) {
+		list := search("")
+
+		require.Equal(t, []string{"GA410", "JT100", "GA412"}, numbers(list))
+		require.Equal(t, int64(3), list.Meta.Total)
+		require.Equal(t, int32(20), list.Meta.PageSize)
+	})
+	t.Run("shows the public view without admin fields", func(t *testing.T) {
+		code, body := send(t, http.MethodGet, publicFlights+"?origin=CGK&destination=DPS&date="+date, "", "")
+
+		require.Equal(t, http.StatusOK, code, body)
+		require.NotContains(t, body, `"capacity"`)
+		require.NotContains(t, body, `"created_at"`)
+		require.Contains(t, body, `"departure_at":"`+at(wib, 6).Format(time.RFC3339)+`"`, "times use the origin's offset")
+	})
+	t.Run("filters by airline, price and local departure time", func(t *testing.T) {
+		require.Equal(t, []string{"JT100"}, numbers(search("&airlines=JT")))
+		require.Equal(t, []string{"JT100", "GA412"}, numbers(search("&max_price=1000000")))
+		require.Equal(t, []string{"JT100"}, numbers(search("&departure_from=09:00&departure_to=12:00")))
+	})
+	t.Run("sorts by price", func(t *testing.T) {
+		require.Equal(t, []string{"JT100", "GA412", "GA410"}, numbers(search("&sort=price_asc")))
+		require.Equal(t, []string{"GA410", "GA412", "JT100"}, numbers(search("&sort=price_desc")))
+	})
+	t.Run("pages through the result", func(t *testing.T) {
+		list := search("&page_size=2&page=2")
+
+		require.Equal(t, []string{"GA412"}, numbers(list))
+		require.Equal(t, int64(3), list.Meta.Total)
+	})
+	t.Run("hides flights without enough seats for the party", func(t *testing.T) {
+		code, body := send(t, http.MethodPatch, adminFlights+"/"+morning.ID, admin, `{"capacity": 2}`)
+		require.Equal(t, http.StatusOK, code, body)
+
+		require.Equal(t, []string{"JT100", "GA412"}, numbers(search("&passengers=3")))
+		require.Equal(t, []string{"GA410", "JT100", "GA412"}, numbers(search("&passengers=2")))
+	})
+	t.Run("returns an empty list for a day without flights or an unknown airport", func(t *testing.T) {
+		code, body := send(t, http.MethodGet, publicFlights+"?origin=CGK&destination=DPS&date="+day.AddDate(0, 0, 1).Format(time.DateOnly), "", "")
+		require.Equal(t, http.StatusOK, code, body)
+		require.Contains(t, body, `"data":[]`)
+
+		code, body = send(t, http.MethodGet, publicFlights+"?origin=ZZZ&destination=DPS&date="+date, "", "")
+		require.Equal(t, http.StatusOK, code, body)
+		require.Contains(t, body, `"data":[]`)
+	})
+	t.Run("rejects a malformed search", func(t *testing.T) {
+		code, body := send(t, http.MethodGet, publicFlights+"?origin=CGK&destination=DPS", "", "")
+
+		require.Equal(t, http.StatusBadRequest, code, body)
+		require.Equal(t, "VALIDATION_ERROR", errorCode(t, body))
+	})
+	t.Run("shows one flight by id", func(t *testing.T) {
+		code, body := send(t, http.MethodGet, publicFlights+"/"+morning.ID, "", "")
+
+		require.Equal(t, http.StatusOK, code, body)
+		var got flight
+		require.NoError(t, json.Unmarshal([]byte(body), &got))
+		require.Equal(t, "GA410", got.FlightNumber)
+		require.Equal(t, int32(2), got.AvailableSeats, "reflects the new capacity")
+		require.NotContains(t, body, `"capacity"`)
+	})
+	t.Run("reports an unknown flight as not found", func(t *testing.T) {
+		for _, id := range []string{"6a1c0e55-1c7e-4c63-9a52-0b1d6b0f2d3e", "not-a-uuid"} {
+			code, body := send(t, http.MethodGet, publicFlights+"/"+id, "", "")
+
+			require.Equal(t, http.StatusNotFound, code, body)
+			require.Equal(t, "NOT_FOUND", errorCode(t, body))
+		}
+	})
+
+	require.NoError(t, stop())
+}

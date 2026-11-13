@@ -7,13 +7,13 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
-
 	"github.com/r-mcdougall/gotravel/internal/platform/authn"
+	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
 )
 
 type Service interface {
@@ -21,6 +21,8 @@ type Service interface {
 	UpdateFlight(ctx context.Context, id string, request UpdateFlightRequest) (AdminFlightResponse, error)
 	GetFlight(ctx context.Context, id string) (AdminFlightResponse, error)
 	ListFlights(ctx context.Context, request ListFlightsRequest) (AdminFlightListResponse, error)
+	SearchFlights(ctx context.Context, request SearchFlightsRequest) (FlightListResponse, error)
+	GetFlightDetail(ctx context.Context, id string) (FlightResponse, error)
 }
 
 type Handler struct {
@@ -38,6 +40,9 @@ func NewHandler(service Service, log *slog.Logger, verifier *authn.Verifier) *Ha
 }
 
 func (h *Handler) Routes(r chi.Router) {
+	r.Get("/api/v1/flights", h.SearchFlights)
+	r.Get("/api/v1/flights/{id}", h.GetFlightDetail)
+
 	r.Group(func(r chi.Router) {
 		r.Use(authn.Authenticate(h.verifier))
 		r.Use(authn.RequireRole(authn.RoleAdmin))
@@ -47,6 +52,32 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/api/v1/admin/flights/{id}", h.GetFlight)
 		r.Patch("/api/v1/admin/flights/{id}", h.UpdateFlight)
 	})
+}
+
+func (h *Handler) SearchFlights(w http.ResponseWriter, r *http.Request) {
+	request, err := parseSearchFlightsQuery(r.URL.Query())
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	response, err := h.service.SearchFlights(r.Context(), request)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) GetFlightDetail(w http.ResponseWriter, r *http.Request) {
+	response, err := h.service.GetFlightDetail(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) ListFlights(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +195,90 @@ func parseListFlightsQuery(query url.Values) (ListFlightsRequest, error) {
 	}
 
 	return request, invalid.err()
+}
+
+// parseSearchFlightsQuery turns the query string into a search request,
+// applying the defaults for passengers, sort and paging. Every invalid
+// parameter is reported together.
+func parseSearchFlightsQuery(query url.Values) (SearchFlightsRequest, error) {
+	request := SearchFlightsRequest{
+		Origin:      query.Get("origin"),
+		Destination: query.Get("destination"),
+		Passengers:  int32Param(query.Get("passengers"), defaultPassengers, maxPassengers),
+		Sort:        query.Get("sort"),
+		Page:        int32Param(query.Get("page"), defaultPage, maxPage),
+		PageSize:    int32Param(query.Get("page_size"), defaultPageSize, maxPageSize),
+	}
+	if request.Sort == "" {
+		request.Sort = sortDepartureAsc
+	}
+	if raw := query.Get("airlines"); raw != "" {
+		request.Airlines = strings.Split(raw, ",")
+	}
+
+	var invalid ValidationError
+
+	rawDate := query.Get("date")
+	if rawDate != "" {
+		date, err := time.Parse(time.DateOnly, rawDate)
+		invalid.check(err == nil, "date", "must be a date in YYYY-MM-DD format")
+		if err == nil {
+			request.Date = date
+		}
+	}
+
+	request.MinPrice = priceParam(&invalid, query, "min_price")
+	request.MaxPrice = priceParam(&invalid, query, "max_price")
+	request.DepartureFrom = timeOfDayParam(&invalid, query, "departure_from")
+	request.DepartureTo = timeOfDayParam(&invalid, query, "departure_to")
+
+	if err := request.Validate(); err != nil {
+		var validationErr *ValidationError
+		if errors.As(err, &validationErr) {
+			for _, detail := range validationErr.Details {
+				if detail.Field == "date" && rawDate != "" {
+					continue // a malformed date is already reported above
+				}
+				invalid.Details = append(invalid.Details, detail)
+			}
+		}
+	}
+
+	return request, invalid.err()
+}
+
+// priceParam reads an optional whole-number price. A value that is not a number is reported, and returns nil so Validate does not report it twice.
+func priceParam(invalid *ValidationError, query url.Values, name string) *int64 {
+	raw := query.Get(name)
+	if raw == "" {
+		return nil
+	}
+
+	price, err := strconv.ParseInt(raw, 10, 64)
+	invalid.check(err == nil, name, "must be a whole number")
+	if err != nil {
+		return nil
+	}
+
+	return &price
+}
+
+// timeOfDayParam reads an optional HH:MM time as an offset from midnight.
+func timeOfDayParam(invalid *ValidationError, query url.Values, name string) *time.Duration {
+	raw := query.Get(name)
+	if raw == "" {
+		return nil
+	}
+
+	parsed, err := time.Parse("15:04", raw)
+	valid := err == nil && len(raw) == len("15:04") // time.Parse also accepts "7:30"
+	invalid.check(valid, name, timeOfDayMessage)
+	if !valid {
+		return nil
+	}
+
+	offset := time.Duration(parsed.Hour())*time.Hour + time.Duration(parsed.Minute())*time.Minute
+	return &offset
 }
 
 func int32Param(raw string, fallback, upper int32) int32 {

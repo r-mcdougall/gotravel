@@ -264,3 +264,88 @@ func TestFlightsInPostgres_listFiltersByRouteAndByTheLocalDateAtTheOrigin(t *tes
 		})
 	}
 }
+
+func TestFlightsInPostgres_searchFindsFlightsByTheLocalDateAtTheOrigin(t *testing.T) {
+	e := newEnv(t)
+	// 01:00 on the 21st in Jakarta is still the 20th in UTC: it belongs to the 21st.
+	jakartaPastMidnight := e.createFlight(t, func(r *CreateFlightRequest) {
+		r.FlightNumber = "GA412"
+		r.DepartureAt = time.Date(2026, 11, 21, 1, 0, 0, 0, wib)
+		r.ArrivalAt = time.Date(2026, 11, 21, 3, 55, 0, 0, wita)
+	})
+	jakartaLateEvening := e.createFlight(t, func(r *CreateFlightRequest) {
+		r.FlightNumber = "GA416"
+		r.DepartureAt = time.Date(2026, 11, 20, 23, 30, 0, 0, wib)
+		r.ArrivalAt = time.Date(2026, 11, 21, 2, 25, 0, 0, wita)
+	})
+	jakartaMorning := e.createFlight(t, func(r *CreateFlightRequest) {
+		r.FlightNumber = "GA414"
+		r.DepartureAt = time.Date(2026, 11, 20, 10, 0, 0, 0, wib)
+		r.ArrivalAt = time.Date(2026, 11, 20, 12, 55, 0, 0, wita)
+		r.Price = 900_000
+	})
+	e.createFlight(t, func(r *CreateFlightRequest) {
+		r.FlightNumber = "GA411"
+		r.OriginCode = "DPS"
+		r.DestinationCode = "CGK"
+		r.DepartureAt = time.Date(2026, 11, 20, 10, 0, 0, 0, wita)
+		r.ArrivalAt = time.Date(2026, 11, 20, 10, 55, 0, 0, wib)
+	})
+	// The clock is pinned so the test keeps working once these dates are in the past.
+	service := newService(e.pgStore, e.reference, func() time.Time {
+		return time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	})
+
+	search := func(day int, mutate func(r *SearchFlightsRequest)) FlightListResponse {
+		request := validSearchRequest()
+		request.Date = time.Date(2026, 11, day, 0, 0, 0, 0, time.UTC)
+		if mutate != nil {
+			mutate(&request)
+		}
+		response, err := service.SearchFlights(t.Context(), request)
+		require.NoError(t, err)
+		return response
+	}
+
+	t.Run("the 20th holds the morning and late evening flights", func(t *testing.T) {
+		response := search(20, nil)
+
+		require.Equal(t, []string{jakartaMorning.ID, jakartaLateEvening.ID}, responseIDs(response))
+		require.Equal(t, int64(2), response.Meta.Total)
+	})
+	t.Run("the 21st holds the flight that leaves after local midnight", func(t *testing.T) {
+		response := search(21, nil)
+
+		require.Equal(t, []string{jakartaPastMidnight.ID}, responseIDs(response))
+	})
+	t.Run("filters and sorting run on the day's flights", func(t *testing.T) {
+		response := search(20, func(r *SearchFlightsRequest) {
+			r.MaxPrice = ptr(int64(1_000_000))
+			r.Sort = sortPriceAsc
+		})
+
+		require.Equal(t, []string{jakartaMorning.ID}, responseIDs(response))
+	})
+	t.Run("the reverse route has no flights on the 21st", func(t *testing.T) {
+		response := search(21, func(r *SearchFlightsRequest) {
+			r.Origin, r.Destination = "DPS", "CGK"
+		})
+
+		require.Empty(t, response.Data)
+	})
+}
+
+func TestFlightsInPostgres_searchHidesFlightsThatHaveDepartedButDetailStillShowsThem(t *testing.T) {
+	e := newEnv(t)
+	flight := e.createFlight(t, nil) // departs 2026-11-20 06:00 WIB
+	afterDeparture := func() time.Time { return time.Date(2026, 11, 20, 6, 0, 0, 0, wib) }
+	service := newService(e.pgStore, e.reference, afterDeparture)
+
+	response, err := service.SearchFlights(t.Context(), validSearchRequest())
+	require.NoError(t, err)
+	require.Empty(t, response.Data)
+
+	detail, err := service.GetFlightDetail(t.Context(), flight.ID)
+	require.NoError(t, err)
+	require.Equal(t, flight.ID, detail.ID)
+}
