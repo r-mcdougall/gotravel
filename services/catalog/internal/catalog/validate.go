@@ -11,7 +11,8 @@ const (
 	maxPage         int32 = 1_000_000 // keeps (page-1)*pageSize inside int32
 	maxPageSize     int32 = 100
 
-	maxPassengers int32 = 9
+	defaultPassengers int32 = 1
+	maxPassengers     int32 = 9
 )
 
 const (
