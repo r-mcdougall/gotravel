@@ -104,12 +104,18 @@ func newTestService(t *testing.T, db *fakeStore) Service {
 // newTestServiceAt pins the clock, so tests decide which flights already departed.
 func newTestServiceAt(t *testing.T, db *fakeStore, now time.Time) Service {
 	t.Helper()
+	return newTestServiceWithCache(t, db, nil, now)
+}
+
+// newTestServiceWithCache is newTestServiceAt with a route-day cache; nil disables it.
+func newTestServiceWithCache(t *testing.T, db *fakeStore, routeCache *RouteDayCache, now time.Time) Service {
+	t.Helper()
 	db.t = t
 
 	reference, err := LoadReference(t.Context(), sampleReferenceQueries(t))
 	require.NoError(t, err)
 
-	return newService(db, reference, func() time.Time { return now })
+	return newService(db, reference, routeCache, func() time.Time { return now })
 }
 
 // sampleFlight is GA410 from Jakarta to Denpasar: 06:00 WIB, 08:55 WITA.
@@ -788,4 +794,230 @@ func TestServiceGetFlightDetail_reportsAMissingFlight(t *testing.T) {
 	_, err := service.GetFlightDetail(t.Context(), sampleFlightID)
 
 	require.ErrorIs(t, err, ErrFlightNotFound)
+}
+
+// routeDayDB serves the same two flights for every route-day query and counts the queries.
+func routeDayDB(queries *int) *fakeStore {
+	return &fakeStore{
+		listFlightsByRouteDay: func(context.Context, store.ListFlightsByRouteDayParams) ([]store.Flight, error) {
+			*queries++
+			return []store.Flight{
+				sampleSearchFlight("cheap", time.Date(2026, 11, 20, 10, 0, 0, 0, wib), 700_000),
+				sampleSearchFlight("dear", time.Date(2026, 11, 20, 12, 0, 0, 0, wib), 1_900_000),
+			}, nil
+		},
+	}
+}
+
+func TestServiceSearchFlights_servesRepeatedSearchesOfARouteDayFromTheCache(t *testing.T) {
+	queries := 0
+	_, fake := newMemoryCache(t)
+	routeCache, _ := newTestRouteDayCache(fake)
+	svc := newTestServiceWithCache(t, routeDayDB(&queries), routeCache, searchTestNow)
+	affordable := validSearchRequest()
+	affordable.MaxPrice = ptr(int64(1_000_000))
+
+	all, err := svc.SearchFlights(t.Context(), validSearchRequest())
+	require.NoError(t, err)
+	filtered, err := svc.SearchFlights(t.Context(), affordable)
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"cheap", "dear"}, responseIDs(all))
+	require.Equal(t, []string{"cheap"}, responseIDs(filtered), "filters run on the cached rows, per request")
+	require.Equal(t, 1, queries, "one database query serves every search of the route day")
+}
+
+func TestServiceSearchFlights_keysTheCacheByRouteAndLocalDate(t *testing.T) {
+	var keys []string
+	fake := &fakeSearchCache{
+		t: t,
+		get: func(_ context.Context, key string) ([]byte, bool, error) {
+			keys = append(keys, key)
+			return nil, false, nil
+		},
+		set: func(context.Context, string, []byte, time.Duration) error { return nil },
+	}
+	routeCache, _ := newTestRouteDayCache(fake)
+	queries := 0
+	svc := newTestServiceWithCache(t, routeDayDB(&queries), routeCache, searchTestNow)
+	reverse := validSearchRequest()
+	reverse.Origin, reverse.Destination = "DPS", "CGK"
+	later := validSearchRequest()
+	later.Date = time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)
+
+	for _, request := range []SearchFlightsRequest{validSearchRequest(), reverse, later} {
+		_, err := svc.SearchFlights(t.Context(), request)
+		require.NoError(t, err)
+	}
+
+	require.Equal(t, []string{
+		"catalog:flights:CGK:DPS:2026-11-20",
+		"catalog:flights:DPS:CGK:2026-11-20",
+		"catalog:flights:CGK:DPS:2026-11-22",
+	}, keys, "the date is the searched date, not today's")
+}
+
+func TestServiceSearchFlights_fallsBackToTheDatabaseWhenTheCacheFails(t *testing.T) {
+	queries := 0
+	fake := &fakeSearchCache{
+		t:   t,
+		get: func(context.Context, string) ([]byte, bool, error) { return nil, false, errBoom },
+	}
+	routeCache, _ := newTestRouteDayCache(fake)
+	svc := newTestServiceWithCache(t, routeDayDB(&queries), routeCache, searchTestNow)
+
+	response, err := svc.SearchFlights(t.Context(), validSearchRequest())
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"cheap", "dear"}, responseIDs(response))
+	require.Equal(t, 1, queries)
+}
+
+func TestServiceSearchFlights_doesNotTouchTheCacheForAnUnknownAirport(t *testing.T) {
+	routeCache, _ := newTestRouteDayCache(&fakeSearchCache{t: t}) // any call fails the test
+	svc := newTestServiceWithCache(t, &fakeStore{}, routeCache, searchTestNow)
+	request := validSearchRequest()
+	request.Origin = "ZZZ"
+
+	response, err := svc.SearchFlights(t.Context(), request)
+
+	require.NoError(t, err)
+	require.Empty(t, response.Data)
+}
+
+func TestServiceSearchFlights_doesNotCacheADatabaseFailure(t *testing.T) {
+	fake := &fakeSearchCache{
+		t:   t,
+		get: func(context.Context, string) ([]byte, bool, error) { return nil, false, nil },
+		// set is nil: nothing may be stored when the query failed.
+	}
+	routeCache, _ := newTestRouteDayCache(fake)
+	db := &fakeStore{
+		listFlightsByRouteDay: func(context.Context, store.ListFlightsByRouteDayParams) ([]store.Flight, error) {
+			return nil, errBoom
+		},
+	}
+	svc := newTestServiceWithCache(t, db, routeCache, searchTestNow)
+
+	_, err := svc.SearchFlights(t.Context(), validSearchRequest())
+
+	require.ErrorIs(t, err, errBoom)
+}
+
+// recordDeletes returns a cache that only accepts deletes and remembers the keys.
+func recordDeletes(t *testing.T, deleted *[]string) *RouteDayCache {
+	t.Helper()
+	routeCache, _ := newTestRouteDayCache(&fakeSearchCache{
+		t: t,
+		delete: func(_ context.Context, keys ...string) error {
+			*deleted = append(*deleted, keys...)
+			return nil
+		},
+	})
+	return routeCache
+}
+
+func TestServiceCreateFlight_forgetsTheCachedRouteDayOfTheNewFlight(t *testing.T) {
+	var deleted []string
+	db := &fakeStore{
+		createFlight:      func(context.Context, store.CreateFlightParams) (store.Flight, error) { return sampleFlight(), nil },
+		insertOutboxEvent: func(context.Context, store.InsertOutboxEventParams) error { return nil },
+	}
+	svc := newTestServiceWithCache(t, db, recordDeletes(t, &deleted), searchTestNow)
+
+	_, err := svc.CreateFlight(t.Context(), validCreateRequest())
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"catalog:flights:CGK:DPS:2026-11-20"}, deleted)
+}
+
+func TestServiceCreateFlight_forgetsTheLocalDayOfAFlightThatLeavesAfterLocalMidnight(t *testing.T) {
+	var deleted []string
+	db := &fakeStore{
+		createFlight: func(context.Context, store.CreateFlightParams) (store.Flight, error) {
+			flight := sampleFlight()
+			flight.DepartureAt = time.Date(2026, 11, 21, 1, 0, 0, 0, wib).UTC() // still the 20th in UTC
+			flight.ArrivalAt = time.Date(2026, 11, 21, 3, 55, 0, 0, wita).UTC()
+			return flight, nil
+		},
+		insertOutboxEvent: func(context.Context, store.InsertOutboxEventParams) error { return nil },
+	}
+	svc := newTestServiceWithCache(t, db, recordDeletes(t, &deleted), searchTestNow)
+
+	_, err := svc.CreateFlight(t.Context(), validCreateRequest())
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"catalog:flights:CGK:DPS:2026-11-21"}, deleted, "the date is the origin's local date")
+}
+
+func TestServiceCreateFlight_keepsTheCacheWhenTheWriteFails(t *testing.T) {
+	routeCache, _ := newTestRouteDayCache(&fakeSearchCache{t: t}) // a delete would fail the test
+	db := &fakeStore{
+		createFlight: func(context.Context, store.CreateFlightParams) (store.Flight, error) {
+			return store.Flight{}, errBoom
+		},
+	}
+	svc := newTestServiceWithCache(t, db, routeCache, searchTestNow)
+
+	_, err := svc.CreateFlight(t.Context(), validCreateRequest())
+
+	require.ErrorIs(t, err, errBoom)
+}
+
+func TestServiceCreateFlight_succeedsEvenWhenTheCacheCannotBeInvalidated(t *testing.T) {
+	routeCache, _ := newTestRouteDayCache(&fakeSearchCache{
+		t:      t,
+		delete: func(context.Context, ...string) error { return errBoom },
+	})
+	db := &fakeStore{
+		createFlight:      func(context.Context, store.CreateFlightParams) (store.Flight, error) { return sampleFlight(), nil },
+		insertOutboxEvent: func(context.Context, store.InsertOutboxEventParams) error { return nil },
+	}
+	svc := newTestServiceWithCache(t, db, routeCache, searchTestNow)
+
+	_, err := svc.CreateFlight(t.Context(), validCreateRequest())
+
+	require.NoError(t, err, "the write is committed; the entry just expires after the TTL")
+}
+
+func TestServiceUpdateFlight_forgetsTheCachedRouteDay(t *testing.T) {
+	var (
+		updated store.UpdateFlightParams
+		event   store.InsertOutboxEventParams
+		deleted []string
+	)
+	svc := newTestServiceWithCache(t, updateDB(&updated, &event), recordDeletes(t, &deleted), searchTestNow)
+
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{Price: ptr(int64(900_000))})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"catalog:flights:CGK:DPS:2026-11-20"}, deleted, "one key, not the same day twice")
+}
+
+func TestServiceUpdateFlight_forgetsBothDaysWhenTheFlightMovesToAnotherDay(t *testing.T) {
+	var (
+		updated store.UpdateFlightParams
+		event   store.InsertOutboxEventParams
+		deleted []string
+	)
+	svc := newTestServiceWithCache(t, updateDB(&updated, &event), recordDeletes(t, &deleted), searchTestNow)
+	departure := time.Date(2026, 11, 21, 7, 0, 0, 0, wib)
+	arrival := time.Date(2026, 11, 21, 9, 55, 0, 0, wita)
+
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{DepartureAt: &departure, ArrivalAt: &arrival})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"catalog:flights:CGK:DPS:2026-11-20", "catalog:flights:CGK:DPS:2026-11-21"}, deleted)
+}
+
+func TestServiceUpdateFlight_keepsTheCacheWhenTheUpdateIsRejected(t *testing.T) {
+	routeCache, _ := newTestRouteDayCache(&fakeSearchCache{t: t}) // a delete would fail the test
+	db := &fakeStore{
+		getFlightForUpdate: func(context.Context, string) (store.Flight, error) { return sampleFlight(), nil },
+	}
+	svc := newTestServiceWithCache(t, db, routeCache, searchTestNow)
+
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{Capacity: ptr(int32(10))})
+
+	require.ErrorIs(t, err, ErrCapacityBelowSold)
 }
