@@ -3,7 +3,7 @@
 COMPOSE := docker compose
 JWT_PRIVATE_KEY_FILE := deploy/keys/jwt_private.pem
 
-.PHONY: help up down reset logs ps psql lint fmt test sqlc keys
+.PHONY: help up down reset logs ps psql lint fmt test sqlc keys seed
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-8s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -44,3 +44,6 @@ sqlc: ## Generate Go code from SQL queries
 
 keys: ## Generate JWT signing keys in deploy/keys
 	@test -f $(JWT_PRIVATE_KEY_FILE) || go run ./tools/keygen
+
+seed: .env ## Seed the catalog with flights through the gateway
+	@set -a && . ./.env && set +a && go run ./tools/seed

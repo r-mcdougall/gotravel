@@ -69,7 +69,7 @@ paths:
             type: array
             items:
               $ref: "#/components/schemas/AirlineCode"
-          example: GA,JT
+          example: [GA, JT]
         - name: min_price
           in: query
           description: Lowest price per passenger in rupiah.

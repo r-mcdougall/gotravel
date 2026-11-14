@@ -77,4 +77,40 @@
 - **Decision:** handler, service and request/response types live in `services/auth/internal/auth`. The sqlc `Queries` type is the data layer. The service depends on small interfaces declared next to it, so unit tests use fakes without a database.
 - **Rejected:** separate model, service and repository packages (indirection that pays off only with more operations or several storage backends).
 - **Trade-off:** the package grows with every feature. Split it when navigating it gets hard, not before.
+
+## 14. Reference data in migrations, times stored in UTC
+
+- **Decision:** airlines and airports (with their IANA time zones) are inserted by a migration. Flights store UTC instants, and the API shows each time with the offset of its own airport. A flight is unique per airline, flight number and departure time. Prices are whole rupiah.
+- **Rejected:** admin endpoints for airlines and airports (the set is fixed for this project); local times without an offset (ambiguous across Indonesia, Singapore, Malaysia and Japan).
+- **Trade-off:** adding an airport or airline needs a migration. A search date is the local date at the origin airport, so a "day" is not a UTC day.
+
+## 15. Search reads one route-day, the rest happens in Go
+
+- **Decision:** search loads all flights of a route on one local day with a single static query, then filters, sorts and paginates in Go. Ties are broken by departure time, then id, so pages never repeat or skip a flight.
+- **Rejected:** dynamic SQL for every filter combination (awkward for sqlc, and no two combinations could share a cache entry).
+- **Trade-off:** every cache miss reads the whole day, about 300 rows on the busiest seeded route. A route with thousands of flights a day would need paging in SQL.
+
+## 16. Redis caches the rows of a route-day, and is optional
+
+- **Decision:** the rows of a route-day are cached for 60 seconds (`SEARCH_CACHE_TTL`), keyed by route and local date, so every search of that day shares one entry. An admin create or update deletes the affected day after commit (both the old and the new day when the schedule moves). With `REDIS_URL` empty the cache is off, and on any Redis error search reads the database. Redis is never the source of truth.
+- **Rejected:** caching whole responses per query (low hit rate); deleting before commit (a search in between could cache the old data again).
+- **Trade-off:** a search that read the database just before an admin write can store old data for up to one TTL, so prices and `available_seats` can be up to 60 seconds old. While Redis is down, every search logs a warning (not rate limited) and can wait up to the 100 ms client timeout.
+
+## 17. Capacity is checked locally until booking exists
+
+- **Decision:** every create and update writes a `flight.changed` event to the outbox in the same transaction (decision 3). Until `booking` exists, lowering capacity is checked against the catalog's own `available_seats`, which moves by the same amount as capacity, and fails with 409 `CAPACITY_BELOW_SOLD`.
+- **Rejected:** calling a booking service that does not exist yet.
+- **Trade-off:** this is a stand-in for the synchronous check in decision 4 and is replaced when booking lands. Until then `available_seats` only changes through catalog writes.
+
+## 18. Services verify JWTs with a public key mounted as a Docker secret
+
+- **Decision:** only `auth` holds the private key (decision 10). Every service that verifies tokens (`catalog` now, `booking` and `payment` later) gets just the public key as a Docker secret and reads it from `JWT_PUBLIC_KEY_FILE` at start. Signature, expiry and the `admin` role are checked locally, with no call to `auth` per request.
+- **Rejected:** asking `auth` to validate every token (every request would depend on it); passing the key in an environment variable (visible in `docker inspect`).
+- **Trade-off:** a token stays valid until it expires, even if the user is demoted or deleted (decision 9), and rotating the key means restarting every verifying service (decision 10).
+
+## 19. Demo data is created through the admin API
+
+- **Decision:** `make seed` signs in as the admin and creates flights through `POST /api/v1/admin/flights`, from a deterministic plan: 606 flights a day for 14 days from tomorrow, 300 a day on CGK to DPS for load tests. Flights that already exist (409 `FLIGHT_EXISTS`) are skipped, never updated, and the run stops after 10 failures.
+- **Rejected:** SQL inserts (they skip validation, outbox events and cache invalidation); a seed migration (demo data in every environment).
+- **Trade-off:** about 8,500 requests instead of one bulk insert, and a changed plan does not update flights that already exist; `make reset` gives a clean start.
   
