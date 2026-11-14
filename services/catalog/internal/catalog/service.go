@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -38,17 +39,19 @@ type flightStore interface {
 type service struct {
 	db        flightStore
 	reference *Reference
+	cache     *RouteDayCache
 	now       func() time.Time
 }
 
-func NewService(db flightStore, reference *Reference) Service {
-	return newService(db, reference, time.Now)
+func NewService(db flightStore, reference *Reference, cache *RouteDayCache) Service {
+	return newService(db, reference, cache, time.Now)
 }
 
-func newService(db flightStore, reference *Reference, now func() time.Time) *service {
+func newService(db flightStore, reference *Reference, cache *RouteDayCache, now func() time.Time) *service {
 	return &service{
 		db:        db,
 		reference: reference,
+		cache:     cache,
 		now:       now,
 	}
 }
@@ -90,6 +93,7 @@ func (s *service) CreateFlight(ctx context.Context, request CreateFlightRequest)
 	if err := s.db.InTx(ctx, fn); err != nil {
 		return AdminFlightResponse{}, err
 	}
+	s.invalidateRouteDays(ctx, created)
 
 	return s.toAdminFlightResponse(created)
 }
@@ -102,7 +106,7 @@ func (s *service) UpdateFlight(ctx context.Context, id string, request UpdateFli
 		return AdminFlightResponse{}, ErrFlightNotFound
 	}
 
-	var updated store.Flight
+	var before, updated store.Flight
 	fn := func(q queries) error {
 		current, err := q.GetFlightForUpdate(ctx, id)
 		if err != nil {
@@ -122,13 +126,15 @@ func (s *service) UpdateFlight(ctx context.Context, id string, request UpdateFli
 			return err
 		}
 
-		updated = flight
+		before, updated = current, flight
 		return nil
 	}
 
 	if err := s.db.InTx(ctx, fn); err != nil {
 		return AdminFlightResponse{}, err
 	}
+	// A new schedule can move the flight to another day, so both days go stale.
+	s.invalidateRouteDays(ctx, before, updated)
 
 	return s.toAdminFlightResponse(updated)
 }
@@ -236,21 +242,51 @@ func (s *service) SearchFlights(ctx context.Context, request SearchFlightsReques
 
 // flightsOnRouteDay loads every flight that departs on the requested date at the origin airport's local time.
 func (s *service) flightsOnRouteDay(ctx context.Context, request SearchFlightsRequest, origin Airport) ([]store.Flight, error) {
-	year, month, day := request.Date.Date()
-	dayStart := time.Date(year, month, day, 0, 0, 0, 0, origin.Location)
-	dayEnd := time.Date(year, month, day+1, 0, 0, 0, 0, origin.Location)
-
-	flights, err := s.db.ListFlightsByRouteDay(ctx, store.ListFlightsByRouteDayParams{
-		OriginCode:      request.Origin,
-		DestinationCode: request.Destination,
-		DayStart:        dayStart,
-		DayEnd:          dayEnd,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list flights by route day: %w", err)
+	day := routeDay{
+		Origin:      request.Origin,
+		Destination: request.Destination,
+		Date:        request.Date.Format(time.DateOnly),
 	}
 
-	return flights, nil
+	return s.cache.load(ctx, day, func(ctx context.Context) ([]store.Flight, error) {
+		year, month, dayOfMonth := request.Date.Date()
+		dayStart := time.Date(year, month, dayOfMonth, 0, 0, 0, 0, origin.Location)
+		dayEnd := time.Date(year, month, dayOfMonth+1, 0, 0, 0, 0, origin.Location)
+
+		flights, err := s.db.ListFlightsByRouteDay(ctx, store.ListFlightsByRouteDayParams{
+			OriginCode:      request.Origin,
+			DestinationCode: request.Destination,
+			DayStart:        dayStart,
+			DayEnd:          dayEnd,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list flights by route day: %w", err)
+		}
+
+		return flights, nil
+	})
+}
+
+// invalidateRouteDays forgets the cached route days of the flights a committed write touched.
+func (s *service) invalidateRouteDays(ctx context.Context, flights ...store.Flight) {
+	var days []routeDay
+	for _, flight := range flights {
+		origin, ok := s.reference.Airport(flight.OriginCode)
+		if !ok {
+			continue // a stored flight always names an airport from the reference data
+		}
+
+		day := routeDay{
+			Origin:      flight.OriginCode,
+			Destination: flight.DestinationCode,
+			Date:        flight.DepartureAt.In(origin.Location).Format(time.DateOnly),
+		}
+		if !slices.Contains(days, day) {
+			days = append(days, day)
+		}
+	}
+
+	s.cache.invalidate(ctx, days...)
 }
 
 func newFlightList(data []FlightResponse, page, pageSize int32, total int64) FlightListResponse {

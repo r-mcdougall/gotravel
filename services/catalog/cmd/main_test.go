@@ -19,12 +19,18 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/r-mcdougall/gotravel/internal/platform/authn"
+	"github.com/r-mcdougall/gotravel/internal/platform/cache"
+	"github.com/r-mcdougall/gotravel/internal/platform/cachetest"
 	"github.com/r-mcdougall/gotravel/internal/platform/dbtest"
 )
 
 // testSigningKey signs the tokens the tests send; its public half is what the
 // service under test loads from JWT_PUBLIC_KEY_FILE.
 var testSigningKey ed25519.PrivateKey
+
+// redisURL is a throwaway Redis. Tests opt in to the search cache by setting
+// REDIS_URL to it; without that the service runs with the cache off.
+var redisURL string
 
 func TestMain(m *testing.M) {
 	os.Exit(runTests(m))
@@ -37,6 +43,14 @@ func runTests(m *testing.M) int {
 		return 1
 	}
 	defer terminate()
+
+	redis, terminateRedis, err := cachetest.Start(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer terminateRedis()
+	redisURL = redis
 
 	keyDir, err := os.MkdirTemp("", "catalog-test-keys")
 	if err != nil {
@@ -61,7 +75,7 @@ func runTests(m *testing.M) int {
 		return 1
 	}
 
-	for key, value := range map[string]string{"DATABASE_URL": url, "JWT_PUBLIC_KEY_FILE": keyFile} {
+	for key, value := range map[string]string{"DATABASE_URL": url, "JWT_PUBLIC_KEY_FILE": keyFile, "REDIS_URL": ""} {
 		if err := os.Setenv(key, value); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -585,6 +599,139 @@ func TestRun_anyoneCanSearchAndViewFlightsWithoutAToken(t *testing.T) {
 			require.Equal(t, "NOT_FOUND", errorCode(t, body))
 		}
 	})
+
+	require.NoError(t, stop())
+}
+
+func TestRun_failsOnInvalidSearchCacheConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		value   string
+		wantErr string
+	}{
+		{"redis url with the wrong scheme", "REDIS_URL", "http://localhost:6379", "create search cache"},
+		{"ttl that is not a duration", "SEARCH_CACHE_TTL", "soon", `SEARCH_CACHE_TTL: invalid duration "soon"`},
+		{"ttl of zero", "SEARCH_CACHE_TTL", "0s", "SEARCH_CACHE_TTL must be positive"},
+		{"negative ttl", "SEARCH_CACHE_TTL", "-5s", "SEARCH_CACHE_TTL must be positive"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.key, tc.value)
+
+			err := run(t.Context(), nil, io.Discard)
+
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestRun_exposesNoSearchCacheMetricsWhenRedisIsNotConfigured(t *testing.T) {
+	addr, stop := startService(t)
+
+	code, body := fetch(t, "http://"+addr+"/metrics")
+
+	require.Equal(t, http.StatusOK, code)
+	require.NotContains(t, body, "catalog_search_cache_total")
+	require.NoError(t, stop())
+}
+
+// createFlightOnRoute creates a CGK to DPS flight through the admin API and returns its id.
+func createFlightOnRoute(t *testing.T, addr, admin, number string, departure time.Time, price int64) string {
+	t.Helper()
+
+	body := fmt.Sprintf(`{
+		"flight_number": %q, "airline_code": "GA",
+		"origin_code": "CGK", "destination_code": "DPS",
+		"departure_at": %q, "arrival_at": %q,
+		"price": %d, "capacity": 180
+	}`, number, departure.Format(time.RFC3339), departure.Add(2*time.Hour).Format(time.RFC3339), price)
+	code, response := send(t, http.MethodPost, "http://"+addr+"/api/v1/admin/flights", admin, body)
+	require.Equal(t, http.StatusCreated, code, response)
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(response), &created))
+	return created.ID
+}
+
+// nextWeek returns 06:00 Jakarta time a week ahead and its local date, so the flight is always upcoming.
+func nextWeek() (departure time.Time, date string) {
+	wib := time.FixedZone("WIB", 7*60*60)
+	day := time.Now().In(wib).AddDate(0, 0, 7)
+	return time.Date(day.Year(), day.Month(), day.Day(), 6, 0, 0, 0, wib), day.Format(time.DateOnly)
+}
+
+func requireMetric(t *testing.T, addr, line string) {
+	t.Helper()
+	code, body := fetch(t, "http://"+addr+"/metrics")
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, body, line)
+}
+
+func TestRun_servesSearchFromRedisAndForgetsTheDayAfterAnAdminWrite(t *testing.T) {
+	truncateFlights(t)
+	t.Setenv("REDIS_URL", redisURL)
+	addr, stop := startService(t)
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	departure, date := nextWeek()
+	searchURL := "http://" + addr + "/api/v1/flights?origin=CGK&destination=DPS&date=" + date
+	key := "catalog:flights:CGK:DPS:" + date
+
+	redisClient, err := cache.New(redisURL)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = redisClient.Close() })
+	require.NoError(t, redisClient.Delete(t.Context(), key), "an earlier run may have left the day behind")
+	cached := func() bool {
+		_, found, err := redisClient.Get(t.Context(), key)
+		require.NoError(t, err)
+		return found
+	}
+
+	id := createFlightOnRoute(t, addr, admin, "GA410", departure, 1_250_000)
+	require.False(t, cached(), "creating a flight must not leave a stale day behind")
+
+	code, body := send(t, http.MethodGet, searchURL, "", "")
+	require.Equal(t, http.StatusOK, code, body)
+	require.Contains(t, body, `"price":1250000`)
+	require.True(t, cached(), "the first search stores the day in Redis")
+	requireMetric(t, addr, `catalog_search_cache_total{result="miss"} 1`)
+
+	code, body = send(t, http.MethodGet, searchURL, "", "")
+	require.Equal(t, http.StatusOK, code, body)
+	require.Contains(t, body, `"price":1250000`)
+	requireMetric(t, addr, `catalog_search_cache_total{result="hit"} 1`)
+
+	code, body = send(t, http.MethodPatch, "http://"+addr+"/api/v1/admin/flights/"+id, admin, `{"price": 900000}`)
+	require.Equal(t, http.StatusOK, code, body)
+	require.False(t, cached(), "the admin write forgets the day")
+
+	code, body = send(t, http.MethodGet, searchURL, "", "")
+	require.Equal(t, http.StatusOK, code, body)
+	require.Contains(t, body, `"price":900000`, "search must not serve the old price")
+	require.NotContains(t, body, `"price":1250000`)
+	requireMetric(t, addr, `catalog_search_cache_total{result="miss"} 2`)
+	requireMetric(t, addr, `catalog_search_cache_total{result="hit"} 1`)
+
+	require.NoError(t, stop())
+}
+
+func TestRun_searchStillWorksWhenRedisIsDown(t *testing.T) {
+	truncateFlights(t)
+	t.Setenv("REDIS_URL", "redis://127.0.0.1:1") // nothing listens there
+	addr, stop := startService(t)                // the service starts without Redis
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	departure, date := nextWeek()
+	createFlightOnRoute(t, addr, admin, "GA410", departure, 1_250_000)
+
+	code, body := send(t, http.MethodGet, "http://"+addr+"/api/v1/flights?origin=CGK&destination=DPS&date="+date, "", "")
+
+	require.Equal(t, http.StatusOK, code, body)
+	require.Contains(t, body, `"flight_number":"GA410"`)
+	requireMetric(t, addr, `catalog_search_cache_total{result="error"} 1`)
+	requireMetric(t, addr, `catalog_search_cache_total{result="hit"} 0`)
 
 	require.NoError(t, stop())
 }

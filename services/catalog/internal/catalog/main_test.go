@@ -81,7 +81,7 @@ func newEnv(t *testing.T) *env {
 	require.NoError(t, err)
 
 	return &env{
-		service:   NewService(pgStore, reference),
+		service:   NewService(pgStore, reference, nil),
 		pgStore:   pgStore,
 		pool:      pool,
 		reference: reference,

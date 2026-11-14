@@ -115,7 +115,7 @@ func TestFlightsInPostgres_createRejectsADuplicateWithoutWritingAnotherEvent(t *
 
 func TestFlightsInPostgres_createRollsBackTheFlightWhenTheOutboxInsertFails(t *testing.T) {
 	e := newEnv(t)
-	svc := NewService(failingOutboxStore{PgStore: e.pgStore}, e.reference)
+	svc := NewService(failingOutboxStore{PgStore: e.pgStore}, e.reference, nil)
 
 	_, err := svc.CreateFlight(t.Context(), validCreateRequest())
 
@@ -127,7 +127,7 @@ func TestFlightsInPostgres_createRollsBackTheFlightWhenTheOutboxInsertFails(t *t
 func TestFlightsInPostgres_updateRollsBackTheChangeWhenTheOutboxInsertFails(t *testing.T) {
 	e := newEnv(t)
 	created := e.createFlight(t, nil)
-	svc := NewService(failingOutboxStore{PgStore: e.pgStore}, e.reference)
+	svc := NewService(failingOutboxStore{PgStore: e.pgStore}, e.reference, nil)
 
 	_, err := svc.UpdateFlight(t.Context(), created.ID, UpdateFlightRequest{Price: ptr(int64(900_000))})
 
@@ -292,7 +292,7 @@ func TestFlightsInPostgres_searchFindsFlightsByTheLocalDateAtTheOrigin(t *testin
 		r.ArrivalAt = time.Date(2026, 11, 20, 10, 55, 0, 0, wib)
 	})
 	// The clock is pinned so the test keeps working once these dates are in the past.
-	service := newService(e.pgStore, e.reference, func() time.Time {
+	service := newService(e.pgStore, e.reference, nil, func() time.Time {
 		return time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	})
 
@@ -339,7 +339,7 @@ func TestFlightsInPostgres_searchHidesFlightsThatHaveDepartedButDetailStillShows
 	e := newEnv(t)
 	flight := e.createFlight(t, nil) // departs 2026-11-20 06:00 WIB
 	afterDeparture := func() time.Time { return time.Date(2026, 11, 20, 6, 0, 0, 0, wib) }
-	service := newService(e.pgStore, e.reference, afterDeparture)
+	service := newService(e.pgStore, e.reference, nil, afterDeparture)
 
 	response, err := service.SearchFlights(t.Context(), validSearchRequest())
 	require.NoError(t, err)
