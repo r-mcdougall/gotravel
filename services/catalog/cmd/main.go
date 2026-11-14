@@ -5,12 +5,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 	_ "time/tzdata" // airport time zones must resolve in the distroless image, which has no zoneinfo
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/r-mcdougall/gotravel/internal/platform/authn"
+	"github.com/r-mcdougall/gotravel/internal/platform/cache"
 	"github.com/r-mcdougall/gotravel/internal/platform/config"
 	"github.com/r-mcdougall/gotravel/internal/platform/database"
 	"github.com/r-mcdougall/gotravel/internal/platform/health"
@@ -21,7 +26,10 @@ import (
 	"github.com/r-mcdougall/gotravel/services/catalog/migrations"
 )
 
-const serviceName = "catalog"
+const (
+	serviceName           = "catalog"
+	defaultSearchCacheTTL = 60 * time.Second
+)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -44,12 +52,17 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	base := config.LoadBase(&loader)
 	databaseURL := loader.Required("DATABASE_URL")
 	publicKeyFile := loader.Required("JWT_PUBLIC_KEY_FILE")
+	redisURL := loader.String("REDIS_URL", "")
+	searchCacheTTL := loader.Duration("SEARCH_CACHE_TTL", defaultSearchCacheTTL)
 
 	if *healthCheck {
 		return health.Probe(ctx, base.HTTPAddr)
 	}
 	if err := loader.Err(); err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	if searchCacheTTL <= 0 {
+		return fmt.Errorf("load config: SEARCH_CACHE_TTL must be positive, got %s", searchCacheTTL)
 	}
 
 	log, err := logging.New(stdout, serviceName, base.LogLevel)
@@ -61,6 +74,13 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("load jwt public key: %w", err)
 	}
+
+	appMetrics := metrics.New()
+	routeCache, closeCache, err := newSearchCache(ctx, log, redisURL, searchCacheTTL, appMetrics.Registry())
+	if err != nil {
+		return err
+	}
+	defer closeCache()
 
 	if err = database.Migrate(ctx, log, databaseURL, migrations.FS); err != nil {
 		return err
@@ -78,9 +98,26 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("load reference data: %w", err)
 	}
 
-	service := catalog.NewService(pgStore, reference)
+	service := catalog.NewService(pgStore, reference, routeCache)
 	handler := catalog.NewHandler(service, log, authn.NewVerifier(publicKey))
 
-	router := httpserver.NewRouter(log, metrics.New(), handler.Routes)
+	router := httpserver.NewRouter(log, appMetrics, handler.Routes)
 	return httpserver.Run(ctx, log, httpserver.New(base.HTTPAddr, router), base.ShutdownTimeout)
+}
+
+func newSearchCache(
+	ctx context.Context, log *slog.Logger, redisURL string, ttl time.Duration, registerer prometheus.Registerer,
+) (routeCache *catalog.RouteDayCache, closeCache func(), err error) {
+	if redisURL == "" {
+		log.InfoContext(ctx, "search cache disabled: REDIS_URL is not set")
+		return nil, func() {}, nil
+	}
+
+	client, err := cache.New(redisURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create search cache: %w", err)
+	}
+
+	log.InfoContext(ctx, "search cache enabled", slog.Duration("ttl", ttl))
+	return catalog.NewRouteDayCache(client, ttl, log, registerer), func() { _ = client.Close() }, nil
 }
