@@ -30,16 +30,7 @@ services:
     image: redis:8.10.3-alpine
     restart: unless-stopped
     # Cache only: no persistence, bounded memory, least-recently-used eviction.
-    command:
-      - redis-server
-      - --save
-      - ""
-      - --appendonly
-      - "no"
-      - --maxmemory
-      - 128mb
-      - --maxmemory-policy
-      - allkeys-lru
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -100,6 +91,8 @@ services:
     environment:
       DATABASE_URL: postgres://catalog_svc:${CATALOG_DB_PASSWORD:?set CATALOG_DB_PASSWORD in .env}@postgres:5432/catalog
       JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public_key
+      REDIS_URL: ${CATALOG_REDIS_URL-redis://redis:6379}
+      SEARCH_CACHE_TTL: ${SEARCH_CACHE_TTL:-60s}
     secrets:
       - jwt_public_key
     depends_on:
