@@ -174,6 +174,8 @@ github.com/prometheus/common v0.72.0 h1:tAYsE+sPJxIncDAobm4H5aQjmox9ZxEIIqPbiffa
 github.com/prometheus/common v0.72.0/go.mod h1:77NWqAQ2tXT7BIK40qjJdw5Acrsrg1TlHAnsQi3i6mk=
 github.com/prometheus/procfs v0.22.0 h1:6q9+/JL9IKAPbCmBrv9n5O5Ty3NKnciV5X7YGw0oics=
 github.com/prometheus/procfs v0.22.0/go.mod h1:CvmFr/GVhIjIvWJZW3tgkODBQMRIf0EyWMQLHCHab58=
+github.com/rabbitmq/amqp091-go v1.16.0 h1:1O8oQqnj9hLACoo6CVMgn57z2pLWXvgemhh4GsquV+Y=
+github.com/rabbitmq/amqp091-go v1.16.0/go.mod h1:Hy4jKW5kQART1u+JkDTF9YYOQUHXqMuhrgxOEeS7G4o=
 github.com/redis/go-redis/v9 v9.23.0 h1:/TTVdJa8BRNsybwwGGnmiYktHNlUXtbOQxlWpHBPL3s=
 github.com/redis/go-redis/v9 v9.23.0/go.mod h1:EWP2UUk+XDaI1s5nQB5mablZN6vccXlmBQTyfnF87D0=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
@@ -210,6 +212,8 @@ github.com/testcontainers/testcontainers-go v0.45.0 h1:ss9Stm9KDX6JLgGL4jr2fC5dw
 github.com/testcontainers/testcontainers-go v0.45.0/go.mod h1:VMJZ7M+qhgfEHWNbtjm596OyEOraULSTDaus/h0hmJI=
 github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0 h1:XsZa4fjEGqWVM3psvyJx04+dG3ZOPV0KkwFhJRqzcJM=
 github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0/go.mod h1:v59yuxG94bpGrtq6MTMmrH1It+196bg7mtGwtDx1QEY=
+github.com/testcontainers/testcontainers-go/modules/rabbitmq v0.45.0 h1:/gxXvR+FNWTBfj+dVIBdxKb2bI4BkMK0o49BlQt+zCI=
+github.com/testcontainers/testcontainers-go/modules/rabbitmq v0.45.0/go.mod h1:rT2f66ZBRmqbFrZs1Bzy0cpPwAkiGkE5043u2vWCwu4=
 github.com/testcontainers/testcontainers-go/modules/redis v0.45.0 h1:U7GClvzAxLc7pjDfFxw3K6+odTa8NbxEa31svO5gl/Q=
 github.com/testcontainers/testcontainers-go/modules/redis v0.45.0/go.mod h1:06G3YVRf2RHAFNKwtFYhVd4CYgnXLWXmckaJNWI4fGY=
 github.com/tetratelabs/wazero v1.11.0 h1:+gKemEuKCTevU4d7ZTzlsvgd1uaToIDtlQlmNbwqYhA=
