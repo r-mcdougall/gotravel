@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +25,8 @@ import (
 	"github.com/r-mcdougall/gotravel/internal/platform/cache"
 	"github.com/r-mcdougall/gotravel/internal/platform/cachetest"
 	"github.com/r-mcdougall/gotravel/internal/platform/dbtest"
+	"github.com/r-mcdougall/gotravel/internal/platform/messaging"
+	"github.com/r-mcdougall/gotravel/internal/platform/messagingtest"
 )
 
 // testSigningKey signs the tokens the tests send; its public half is what the
@@ -31,6 +36,9 @@ var testSigningKey ed25519.PrivateKey
 // redisURL is a throwaway Redis. Tests opt in to the search cache by setting
 // REDIS_URL to it; without that the service runs with the cache off.
 var redisURL string
+
+// rabbitmqURL is a throwaway RabbitMQ the outbox relay publishes to.
+var rabbitmqURL string
 
 func TestMain(m *testing.M) {
 	os.Exit(runTests(m))
@@ -51,6 +59,14 @@ func runTests(m *testing.M) int {
 	}
 	defer terminateRedis()
 	redisURL = redis
+
+	rabbitmq, terminateRabbitMQ, err := messagingtest.Start(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer terminateRabbitMQ()
+	rabbitmqURL = rabbitmq
 
 	keyDir, err := os.MkdirTemp("", "catalog-test-keys")
 	if err != nil {
@@ -75,7 +91,9 @@ func runTests(m *testing.M) int {
 		return 1
 	}
 
-	for key, value := range map[string]string{"DATABASE_URL": url, "JWT_PUBLIC_KEY_FILE": keyFile, "REDIS_URL": ""} {
+	for key, value := range map[string]string{
+		"DATABASE_URL": url, "JWT_PUBLIC_KEY_FILE": keyFile, "REDIS_URL": "", "RABBITMQ_URL": rabbitmqURL,
+	} {
 		if err := os.Setenv(key, value); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -219,6 +237,14 @@ func TestRun_failsWithoutDatabaseURL(t *testing.T) {
 	err := run(t.Context(), nil, io.Discard)
 
 	require.ErrorContains(t, err, "DATABASE_URL is required")
+}
+
+func TestRun_failsWithoutRabbitMQURL(t *testing.T) {
+	t.Setenv("RABBITMQ_URL", "")
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "RABBITMQ_URL is required")
 }
 
 func TestRun_failsWhenDatabaseIsUnreachable(t *testing.T) {
@@ -732,6 +758,93 @@ func TestRun_searchStillWorksWhenRedisIsDown(t *testing.T) {
 	require.Contains(t, body, `"flight_number":"GA410"`)
 	requireMetric(t, addr, `catalog_search_cache_total{result="error"} 1`)
 	requireMetric(t, addr, `catalog_search_cache_total{result="hit"} 0`)
+
+	require.NoError(t, stop())
+}
+
+// logSignal closes ready once a log line containing match is written.
+type logSignal struct {
+	match string
+	ready chan struct{}
+	once  sync.Once
+}
+
+func (s *logSignal) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(s.match)) {
+		s.once.Do(func() { close(s.ready) })
+	}
+	return len(p), nil
+}
+
+func TestRun_publishesFlightChangesToRabbitMQ(t *testing.T) {
+	truncateFlights(t)
+
+	// Messages published before the queue exists are dropped, so wait until the consumer has declared it.
+	started := &logSignal{match: "rabbitmq consumer started", ready: make(chan struct{})}
+	received := make(chan messaging.Delivery, 10)
+	ctx, cancel := context.WithCancel(t.Context())
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		messaging.Consume(ctx, rabbitmqURL, messaging.Subscription{
+			Exchange: "catalog.events", RoutingKey: "flight.changed", Queue: "test.catalog-flight-changed",
+		}, func(_ context.Context, d messaging.Delivery) error {
+			received <- d
+			return nil
+		}, slog.New(slog.NewTextHandler(started, nil)))
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-consumerDone
+	})
+	select {
+	case <-started.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("test consumer did not start")
+	}
+
+	addr, stop := startService(t)
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	departure, _ := nextWeek()
+	id := createFlightOnRoute(t, addr, admin, "GA410", departure, 1_250_000)
+
+	var delivery messaging.Delivery
+	select {
+	case delivery = <-received:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no flight.changed event reached RabbitMQ")
+	}
+
+	require.Equal(t, "flight.changed", delivery.Type)
+	var event struct {
+		EventID    string    `json:"event_id"`
+		Type       string    `json:"type"`
+		OccurredAt time.Time `json:"occurred_at"`
+		Data       struct {
+			FlightID string `json:"flight_id"`
+			Price    int64  `json:"price"`
+			Capacity int32  `json:"capacity"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(delivery.Body, &event))
+	require.Equal(t, delivery.ID, event.EventID)
+	require.Equal(t, "flight.changed", event.Type)
+	require.False(t, event.OccurredAt.IsZero())
+	require.Equal(t, id, event.Data.FlightID)
+	require.Equal(t, int64(1_250_000), event.Data.Price)
+	require.Equal(t, int32(180), event.Data.Capacity)
+
+	require.Eventually(t, func() bool {
+		conn, err := pgx.Connect(t.Context(), os.Getenv("DATABASE_URL"))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = conn.Close(t.Context()) }()
+
+		var pending int
+		err = conn.QueryRow(t.Context(), `SELECT count(*) FROM outbox WHERE published_at IS NULL`).Scan(&pending)
+		return err == nil && pending == 0
+	}, 5*time.Second, 50*time.Millisecond, "the relay marks the event published")
 
 	require.NoError(t, stop())
 }
