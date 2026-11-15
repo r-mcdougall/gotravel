@@ -113,4 +113,34 @@
 - **Decision:** `make seed` signs in as the admin and creates flights through `POST /api/v1/admin/flights`, from a deterministic plan: 606 flights a day for 14 days from tomorrow, 300 a day on CGK to DPS for load tests. Flights that already exist (409 `FLIGHT_EXISTS`) are skipped, never updated, and the run stops after 10 failures.
 - **Rejected:** SQL inserts (they skip validation, outbox events and cache invalidation); a seed migration (demo data in every environment).
 - **Trade-off:** about 8,500 requests instead of one bulk insert, and a changed plan does not update flights that already exist; `make reset` gives a clean start.
+
+## 20. The outbox relay polls
+
+- **Decision:** every service that publishes events runs a relay goroutine. It polls the outbox every 500 ms and takes up to 100 rows with `FOR UPDATE SKIP LOCKED`; a full batch is followed immediately by the next one. Rows are marked published only after the broker confirms every message of the batch. Failures back off up to 30 seconds.
+- **Rejected:** `LISTEN/NOTIFY` (notifications are lost while the relay is down, so polling is still needed, plus a dedicated connection); publishing right after commit with a fallback sweep (two paths for the same job); the Watermill forwarder (its own table schema and message format).
+- **Trade-off:** an event can wait up to 500 ms. A crash between the broker confirm and the commit publishes the batch again, which decision 3 already requires consumers to handle.
+
+## 21. One relay in the platform package, one outbox shape everywhere
+
+- **Decision:** `internal/platform/outbox` serves every service and queries a table named `outbox` with fixed columns (`id`, `event_type`, `payload`, `created_at`, `published_at`) through pgx. The relay builds the envelope `{event_id, type, occurred_at, data}` from the row, so services store only the event data, inserted through sqlc in the same transaction as the change.
+- **Rejected:** a relay per service with sqlc queries (three copies of the same code and tests).
+- **Trade-off:** the table shape is a convention that sqlc does not check against each service's migration. A service that changes its outbox breaks the relay at runtime. The relay tests use the same DDL as the migrations.
+
+## 22. RabbitMQ topology
+
+- **Decision:** one durable topic exchange per producing service (`catalog.events`, `booking.events`, `payment.events`) with the event type as routing key, and one quorum queue per consumer and event (`<consumer>.<event>`, for example `booking.flight-changed`). Producers declare their exchange; consumers declare the exchange, queue and binding, so services can start in any order. All services share one RabbitMQ user and vhost. Services use `internal/platform/messaging` and never import the AMQP client.
+- **Rejected:** classic queues (quorum queues are the durable default in RabbitMQ 4 and bring a delivery limit); one RabbitMQ user per service (per-exchange permissions are not worth it here, unlike the separate databases in decision 1).
+- **Trade-off:** any service can publish to any exchange. Changing a queue's arguments makes its declaration fail with `PRECONDITION_FAILED` until the queue is deleted (`make reset` in development).
+
+## 23. Failed messages end in a dead-letter queue
+
+- **Decision:** consumers ack manually with a prefetch of 10. A handler returns `messaging.ErrPermanent` for a message that can never succeed, such as one that cannot be decoded, and it is rejected straight to `<queue>.dlq`. Any other error is requeued after one second until the quorum delivery limit (20) moves the message to the dead-letter queue. Lost connections are re-dialed with a backoff from 1 to 30 seconds; a message interrupted by shutdown is left unacknowledged and returns to the queue.
+- **Rejected:** requeueing forever (a poison message would loop without end); dropping failed messages; the experimental automatic recovery of `amqp091-go`.
+- **Trade-off:** a database outage longer than the retries moves messages to the dead-letter queue, and moving them back is manual through the management UI.
+
+## 24. Messages without a queue are dropped
+
+- **Decision:** messages are published with `mandatory=false`, so the broker confirms and discards a message that no queue is bound for. Consumers create their queues when they start.
+- **Rejected:** `mandatory=true` with return handling (rows would wait in the outbox until a consumer exists, but an unread return channel can stall the client); a definitions file that creates every queue when the broker starts (queue arguments written in two places).
+- **Trade-off:** a consumer that starts after events were published never receives them. In development, run `make reset && make seed` after adding a consumer; a real deployment would need a backfill.
   
