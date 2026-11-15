@@ -21,13 +21,16 @@ import (
 	"github.com/r-mcdougall/gotravel/internal/platform/health"
 	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
 	"github.com/r-mcdougall/gotravel/internal/platform/logging"
+	"github.com/r-mcdougall/gotravel/internal/platform/messaging"
 	"github.com/r-mcdougall/gotravel/internal/platform/metrics"
+	"github.com/r-mcdougall/gotravel/internal/platform/outbox"
 	"github.com/r-mcdougall/gotravel/services/catalog/internal/catalog"
 	"github.com/r-mcdougall/gotravel/services/catalog/migrations"
 )
 
 const (
 	serviceName           = "catalog"
+	eventsExchange        = "catalog.events"
 	defaultSearchCacheTTL = 60 * time.Second
 )
 
@@ -52,6 +55,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	base := config.LoadBase(&loader)
 	databaseURL := loader.Required("DATABASE_URL")
 	publicKeyFile := loader.Required("JWT_PUBLIC_KEY_FILE")
+	rabbitmqURL := loader.Required("RABBITMQ_URL")
 	redisURL := loader.String("REDIS_URL", "")
 	searchCacheTTL := loader.Duration("SEARCH_CACHE_TTL", defaultSearchCacheTTL)
 
@@ -91,6 +95,20 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	defer pool.Close()
+
+	publisher := messaging.NewPublisher(rabbitmqURL, eventsExchange)
+	defer func() { _ = publisher.Close() }()
+
+	relayCtx, stopRelay := context.WithCancel(ctx)
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		outbox.NewRelay(pool, publisher, log.With(slog.String("component", "outbox_relay"))).Run(relayCtx)
+	}()
+	defer func() {
+		stopRelay()
+		<-relayDone
+	}()
 
 	pgStore := catalog.NewPgStore(pool)
 	reference, err := catalog.LoadReference(ctx, pgStore)
