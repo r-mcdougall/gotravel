@@ -5,11 +5,18 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/r-mcdougall/gotravel/services/booking/internal/store"
+
+	"github.com/r-mcdougall/gotravel/services/booking/internal/booking"
+
+	"github.com/r-mcdougall/gotravel/internal/platform/messaging"
 
 	"github.com/r-mcdougall/gotravel/internal/platform/config"
 	"github.com/r-mcdougall/gotravel/internal/platform/database"
@@ -21,6 +28,12 @@ import (
 )
 
 const serviceName = "booking"
+
+var flightChanged = messaging.Subscription{
+	Exchange:   "catalog.events",
+	RoutingKey: "flight.changed",
+	Queue:      "booking.flight.changed",
+}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -42,6 +55,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	var loader config.Loader
 	base := config.LoadBase(&loader)
 	databaseURL := loader.Required("DATABASE_URL")
+	rabbitmqURL := loader.Required("RABBITMQ_URL")
 
 	if *healthCheck {
 		return health.Probe(ctx, base.HTTPAddr)
@@ -66,6 +80,20 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	defer pool.Close()
+
+	events := booking.NewEventHandler(store.New(pool))
+	consumerCtx, stopConsumer := context.WithCancel(ctx)
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+
+		consumerLogger := log.With(slog.String("component", "flight_changed_consumer"))
+		messaging.Consume(consumerCtx, rabbitmqURL, flightChanged, events.HandleFlightChanged, consumerLogger)
+	}()
+	defer func() {
+		stopConsumer()
+		<-consumerDone
+	}()
 
 	router := httpserver.NewRouter(log, appMetrics, func(chi.Router) {})
 	return httpserver.Run(ctx, log, httpserver.New(base.HTTPAddr, router), base.ShutdownTimeout)

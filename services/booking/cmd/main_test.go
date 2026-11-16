@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +16,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/r-mcdougall/gotravel/internal/platform/dbtest"
+	"github.com/r-mcdougall/gotravel/internal/platform/messaging"
+	"github.com/r-mcdougall/gotravel/internal/platform/messagingtest"
 )
+
+// rabbitmqURL is a throwaway RabbitMQ the service consumes catalog events from.
+var rabbitmqURL string
 
 func TestMain(m *testing.M) {
 	os.Exit(runTests(m))
@@ -28,9 +35,19 @@ func runTests(m *testing.M) int {
 	}
 	defer terminate()
 
-	if err := os.Setenv("DATABASE_URL", url); err != nil {
+	rabbitmq, terminateRabbitMQ, err := messagingtest.Start(context.Background())
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
+	}
+	defer terminateRabbitMQ()
+	rabbitmqURL = rabbitmq
+
+	for key, value := range map[string]string{"DATABASE_URL": url, "RABBITMQ_URL": rabbitmqURL} {
+		if err := os.Setenv(key, value); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
 	}
 	return m.Run()
 }
@@ -65,12 +82,17 @@ func fetch(t *testing.T, url string) (int, string) {
 // stop shuts it down and returns what run returned.
 func startService(t *testing.T) (addr string, stop func() error) {
 	t.Helper()
+	return startServiceWithLogs(t, io.Discard)
+}
+
+func startServiceWithLogs(t *testing.T, logs io.Writer) (addr string, stop func() error) {
+	t.Helper()
 	addr = freeAddr(t)
 	t.Setenv("HTTP_ADDR", addr)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, nil, io.Discard) }()
+	go func() { done <- run(ctx, nil, logs) }()
 
 	require.Eventually(t, func() bool {
 		code, _ := fetch(t, "http://"+addr+"/healthz")
@@ -151,6 +173,14 @@ func TestRun_failsWithoutDatabaseURL(t *testing.T) {
 	require.ErrorContains(t, err, "DATABASE_URL is required")
 }
 
+func TestRun_failsWithoutRabbitMQURL(t *testing.T) {
+	t.Setenv("RABBITMQ_URL", "")
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "RABBITMQ_URL is required")
+}
+
 func TestRun_failsWhenDatabaseIsUnreachable(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://booking_svc:x@127.0.0.1:1/booking")
 
@@ -174,6 +204,64 @@ func TestRun_appliesMigrationsOnStart(t *testing.T) {
 		`SELECT count(*) FROM information_schema.tables
 		 WHERE table_schema = 'public' AND table_name = 'flight_inventories'`)
 	require.Equal(t, 1, tables)
+
+	require.NoError(t, stop())
+}
+
+// logSignal closes ready once a log line containing match is written.
+type logSignal struct {
+	match string
+	ready chan struct{}
+	once  sync.Once
+}
+
+func (s *logSignal) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(s.match)) {
+		s.once.Do(func() { close(s.ready) })
+	}
+	return len(p), nil
+}
+
+func TestRun_appliesFlightChangedEventsToTheInventory(t *testing.T) {
+	// Messages published before the queue exists are dropped, so wait until the consumer has declared it.
+	started := &logSignal{match: "rabbitmq consumer started", ready: make(chan struct{})}
+	_, stop := startServiceWithLogs(t, started)
+	select {
+	case <-started.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("flight.changed consumer did not start")
+	}
+
+	const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
+	publisher := messaging.NewPublisher(rabbitmqURL, "catalog.events")
+	t.Cleanup(func() { _ = publisher.Close() })
+	body := fmt.Sprintf(`{
+		"event_id": "6a1c0e55-1c7e-4c63-9a52-0b1d6b0f2d3e",
+		"type": "flight.changed",
+		"occurred_at": "2026-11-16T10:00:00Z",
+		"data": {
+			"flight_id": %q, "version": 1,
+			"flight_number": "GA410", "airline_code": "GA",
+			"origin_code": "CGK", "destination_code": "DPS",
+			"departure_at": "2027-03-14T23:00:00Z", "arrival_at": "2027-03-15T00:55:00Z",
+			"price": 1250000, "capacity": 180
+		}
+	}`, flightID)
+	require.NoError(t, publisher.Publish(t.Context(), []messaging.Message{{
+		ID: "6a1c0e55-1c7e-4c63-9a52-0b1d6b0f2d3e", Type: "flight.changed", Timestamp: time.Now(), Body: []byte(body),
+	}}))
+
+	require.Eventually(t, func() bool {
+		conn, err := pgx.Connect(t.Context(), os.Getenv("DATABASE_URL"))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = conn.Close(t.Context()) }()
+
+		var capacity int32
+		err = conn.QueryRow(t.Context(), `SELECT capacity FROM flight_inventories WHERE flight_id = $1`, flightID).Scan(&capacity)
+		return err == nil && capacity == 180
+	}, 10*time.Second, 50*time.Millisecond, "the event reaches the inventory")
 
 	require.NoError(t, stop())
 }
