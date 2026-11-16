@@ -10,6 +10,10 @@ scrape_configs:
     static_configs:
       - targets: ["catalog:8080"]
 
+  - job_name: booking
+    static_configs:
+      - targets: ["booking:8080"]
+
   - job_name: rabbitmq
     static_configs:
       - targets: ["rabbitmq:15692"]

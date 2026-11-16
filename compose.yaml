@@ -108,6 +108,24 @@ services:
       retries: 3
       start_period: 5s
 
+  booking:
+    build:
+      context: .
+      args:
+        SERVICE: booking
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://booking_svc:${BOOKING_DB_PASSWORD:?set BOOKING_DB_PASSWORD in .env}@postgres:5432/booking
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
   prometheus:
     image: prom/prometheus:v3.16.0
     restart: unless-stopped
