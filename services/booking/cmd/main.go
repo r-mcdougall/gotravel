@@ -1,0 +1,100 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/r-mcdougall/gotravel/services/booking/internal/store"
+
+	"github.com/r-mcdougall/gotravel/services/booking/internal/booking"
+
+	"github.com/r-mcdougall/gotravel/internal/platform/messaging"
+
+	"github.com/r-mcdougall/gotravel/internal/platform/config"
+	"github.com/r-mcdougall/gotravel/internal/platform/database"
+	"github.com/r-mcdougall/gotravel/internal/platform/health"
+	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
+	"github.com/r-mcdougall/gotravel/internal/platform/logging"
+	"github.com/r-mcdougall/gotravel/internal/platform/metrics"
+	"github.com/r-mcdougall/gotravel/services/booking/migrations"
+)
+
+const serviceName = "booking"
+
+var flightChanged = messaging.Subscription{
+	Exchange:   "catalog.events",
+	RoutingKey: "flight.changed",
+	Queue:      "booking.flight.changed",
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", serviceName, err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet(serviceName, flag.ContinueOnError)
+	healthCheck := fs.Bool("healthcheck", false, "probe /healthz and exit")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	var loader config.Loader
+	base := config.LoadBase(&loader)
+	databaseURL := loader.Required("DATABASE_URL")
+	rabbitmqURL := loader.Required("RABBITMQ_URL")
+
+	if *healthCheck {
+		return health.Probe(ctx, base.HTTPAddr)
+	}
+	if err := loader.Err(); err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	log, err := logging.New(stdout, serviceName, base.LogLevel)
+	if err != nil {
+		return err
+	}
+
+	appMetrics := metrics.New()
+
+	if err = database.Migrate(ctx, log, databaseURL, migrations.FS); err != nil {
+		return err
+	}
+
+	pool, err := database.Connect(ctx, databaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	events := booking.NewEventHandler(store.New(pool))
+	consumerCtx, stopConsumer := context.WithCancel(ctx)
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+
+		consumerLogger := log.With(slog.String("component", "flight_changed_consumer"))
+		messaging.Consume(consumerCtx, rabbitmqURL, flightChanged, events.HandleFlightChanged, consumerLogger)
+	}()
+	defer func() {
+		stopConsumer()
+		<-consumerDone
+	}()
+
+	router := httpserver.NewRouter(log, appMetrics, func(chi.Router) {})
+	return httpserver.Run(ctx, log, httpserver.New(base.HTTPAddr, router), base.ShutdownTimeout)
+}
