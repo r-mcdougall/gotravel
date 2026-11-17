@@ -9,10 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/go-chi/chi/v5"
-
-	"github.com/r-mcdougall/gotravel/services/booking/internal/store"
+	"github.com/r-mcdougall/gotravel/internal/platform/authn"
 
 	"github.com/r-mcdougall/gotravel/services/booking/internal/booking"
 
@@ -27,7 +26,10 @@ import (
 	"github.com/r-mcdougall/gotravel/services/booking/migrations"
 )
 
-const serviceName = "booking"
+const (
+	serviceName    = "booking"
+	defaultHoldTTL = 15 * time.Minute
+)
 
 var flightChanged = messaging.Subscription{
 	Exchange:   "catalog.events",
@@ -56,6 +58,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	base := config.LoadBase(&loader)
 	databaseURL := loader.Required("DATABASE_URL")
 	rabbitmqURL := loader.Required("RABBITMQ_URL")
+	publicKeyFile := loader.Required("JWT_PUBLIC_KEY_FILE")
+	holdTTL := loader.Duration("HOLD_TTL", defaultHoldTTL)
 
 	if *healthCheck {
 		return health.Probe(ctx, base.HTTPAddr)
@@ -63,10 +67,18 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if err := loader.Err(); err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	if holdTTL <= 0 {
+		return fmt.Errorf("load config: HOLD_TTL must be positive, got %s", holdTTL)
+	}
 
 	log, err := logging.New(stdout, serviceName, base.LogLevel)
 	if err != nil {
 		return err
+	}
+
+	publicKey, err := authn.LoadPublicKey(publicKeyFile)
+	if err != nil {
+		return fmt.Errorf("load jwt public key: %w", err)
 	}
 
 	appMetrics := metrics.New()
@@ -81,7 +93,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	defer pool.Close()
 
-	events := booking.NewEventHandler(store.New(pool))
+	pgStore := booking.NewPgStore(pool)
+	events := booking.NewEventHandler(pgStore)
 	consumerCtx, stopConsumer := context.WithCancel(ctx)
 	consumerDone := make(chan struct{})
 	go func() {
@@ -95,6 +108,9 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		<-consumerDone
 	}()
 
-	router := httpserver.NewRouter(log, appMetrics, func(chi.Router) {})
+	service := booking.NewService(pgStore, holdTTL)
+	handler := booking.NewHandler(service, log, authn.NewVerifier(publicKey))
+
+	router := httpserver.NewRouter(log, appMetrics, handler.Routes)
 	return httpserver.Run(ctx, log, httpserver.New(base.HTTPAddr, router), base.ShutdownTimeout)
 }

@@ -3,10 +3,12 @@ package booking
 import "time"
 
 const (
-	maxPassengers  = 9
-	maxFullNameLen = 100
-	maxPage        = 10_000
-	maxPageSize    = 100
+	maxPassengers   = 9
+	maxFullNameLen  = 100
+	defaultPage     = 1
+	maxPage         = 10_000
+	defaultPageSize = 20
+	maxPageSize     = 100
 )
 
 type HoldRequest struct {
