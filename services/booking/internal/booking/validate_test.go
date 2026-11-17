@@ -40,7 +40,8 @@ func TestHoldRequestValidate(t *testing.T) {
 		{"birth date in the future", func(r *HoldRequest) { r.Passengers[0].BirthDate = tomorrow }, "passengers[0].birth_date"},
 	}
 
-	require.NoError(t, valid().Validate())
+	request := valid()
+	require.NoError(t, request.Validate())
 	maxParty := valid()
 	maxParty.Passengers = slices.Repeat(maxParty.Passengers[:1], maxPassengers)
 	require.NoError(t, maxParty.Validate(), "a full party of %d is allowed", maxPassengers)
