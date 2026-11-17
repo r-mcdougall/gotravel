@@ -199,7 +199,7 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	_, err = pool.Exec(t.Context(), "TRUNCATE flight_inventories")
+	_, err = pool.Exec(t.Context(), "TRUNCATE passengers, bookings, outbox, flight_inventories")
 	require.NoError(t, err)
 	return pool
 }

@@ -23,6 +23,10 @@ sql:
               type: Time
               pointer: true
           - db_type: date
+            go_type:
+              import: time
+              type: Time
+          - db_type: date
             nullable: true
             go_type:
               import: time

@@ -10,7 +10,17 @@ import (
 	"github.com/r-mcdougall/gotravel/services/booking/internal/store"
 )
 
-const eventFlightChanged = "flight.change"
+const (
+	eventFlightChanged       = "flight.changed"
+	eventAvailabilityChanged = "flight.availability_changed"
+)
+
+type flightChangedEvent struct {
+	EventID    string            `json:"event_id"`
+	Type       string            `json:"type"`
+	OccurredAt time.Time         `json:"occurred_at"`
+	Data       flightChangedData `json:"data"`
+}
 
 type flightChangedData struct {
 	FlightID        string    `json:"flight_id"`
@@ -25,13 +35,6 @@ type flightChangedData struct {
 	Capacity        int32     `json:"capacity"`
 }
 
-type flightChangedEvent struct {
-	EventID    string            `json:"event_id"`
-	Type       string            `json:"type"`
-	OccurredAt time.Time         `json:"occurred_at"`
-	Data       flightChangedData `json:"data"`
-}
-
 type inventoryStore interface {
 	UpsertFlightInventory(ctx context.Context, arg store.UpsertFlightInventoryParams) error
 }
@@ -44,6 +47,7 @@ func NewEventHandler(store inventoryStore) *EventHandler {
 	return &EventHandler{store: store}
 }
 
+// HandleFlightChanged copies the catalog's view of a flight into the inventory.
 func (h *EventHandler) HandleFlightChanged(ctx context.Context, d messaging.Delivery) error {
 	var event flightChangedEvent
 	if err := json.Unmarshal(d.Body, &event); err != nil {
@@ -55,7 +59,7 @@ func (h *EventHandler) HandleFlightChanged(ctx context.Context, d messaging.Deli
 		return fmt.Errorf("%s message %s has flight_id %q: %w", eventFlightChanged, d.ID, data.FlightID, messaging.ErrPermanent)
 	}
 
-	params := store.UpsertFlightInventoryParams{
+	err := h.store.UpsertFlightInventory(ctx, store.UpsertFlightInventoryParams{
 		FlightID:        data.FlightID,
 		Version:         data.Version,
 		FlightNumber:    data.FlightNumber,
@@ -66,10 +70,42 @@ func (h *EventHandler) HandleFlightChanged(ctx context.Context, d messaging.Deli
 		ArrivalAt:       data.ArrivalAt.UTC(),
 		Price:           data.Price,
 		Capacity:        data.Capacity,
-	}
-	if err := h.store.UpsertFlightInventory(ctx, params); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("upsert flight inventory %s: %w", data.FlightID, err)
 	}
 
 	return nil
+}
+
+type availabilityChangedData struct {
+	FlightID            string `json:"flight_id"`
+	AvailabilityVersion int64  `json:"availability_version"`
+	AvailableSeats      int32  `json:"available_seats"`
+}
+
+type outboxWriter interface {
+	InsertOutboxEvent(ctx context.Context, arg store.InsertOutboxEventParams) error
+}
+
+// recordAvailabilityChanged tells the catalog how many seats a flight has left.
+func recordAvailabilityChanged(ctx context.Context, q outboxWriter, flight store.FlightInventory) error {
+	payload, err := json.Marshal(availabilityChangedData{
+		FlightID:            flight.FlightID,
+		AvailabilityVersion: flight.AvailabilityVersion,
+		AvailableSeats:      availableSeats(flight),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal %s event: %w", eventAvailabilityChanged, err)
+	}
+
+	if err := q.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{EventType: eventAvailabilityChanged, Payload: payload}); err != nil {
+		return fmt.Errorf("insert outbox event: %w", err)
+	}
+	return nil
+}
+
+// availableSeats can see a negative balance after the catalog lowers capacity; it reports zero then.
+func availableSeats(flight store.FlightInventory) int32 {
+	return max(flight.Capacity-flight.HeldSeats-flight.SoldSeats, 0)
 }
