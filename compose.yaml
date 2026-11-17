@@ -117,6 +117,10 @@ services:
     environment:
       DATABASE_URL: postgres://booking_svc:${BOOKING_DB_PASSWORD:?set BOOKING_DB_PASSWORD in .env}@postgres:5432/booking
       RABBITMQ_URL: amqp://${RABBITMQ_USER:?set RABBITMQ_USER in .env}:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public_key
+      HOLD_TTL: ${HOLD_TTL:-15m}
+    secrets:
+      - jwt_public_key
     depends_on:
       postgres:
         condition: service_healthy
