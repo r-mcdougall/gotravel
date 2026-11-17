@@ -8,6 +8,18 @@ import (
 	"time"
 )
 
+type Booking struct {
+	ID             string
+	UserID         string
+	FlightID       string
+	Status         string
+	PassengerCount int32
+	SeatPrice      int64
+	ExpiresAt      time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
 type FlightInventory struct {
 	FlightID            string
 	Version             int32
@@ -23,4 +35,20 @@ type FlightInventory struct {
 	SoldSeats           int32
 	AvailabilityVersion int64
 	UpdatedAt           time.Time
+}
+
+type Outbox struct {
+	ID          string
+	EventType   string
+	Payload     []byte
+	CreatedAt   time.Time
+	PublishedAt *time.Time
+}
+
+type Passenger struct {
+	ID        string
+	BookingID string
+	Seq       int16
+	FullName  string
+	BirthDate time.Time
 }
