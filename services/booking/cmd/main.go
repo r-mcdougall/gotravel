@@ -21,12 +21,14 @@ import (
 	"github.com/r-mcdougall/gotravel/internal/platform/logging"
 	"github.com/r-mcdougall/gotravel/internal/platform/messaging"
 	"github.com/r-mcdougall/gotravel/internal/platform/metrics"
+	"github.com/r-mcdougall/gotravel/internal/platform/outbox"
 	"github.com/r-mcdougall/gotravel/services/booking/internal/booking"
 	"github.com/r-mcdougall/gotravel/services/booking/migrations"
 )
 
 const (
 	serviceName    = "booking"
+	eventsExchange = "booking.events"
 	defaultHoldTTL = 15 * time.Minute
 )
 
@@ -93,6 +95,11 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	defer pool.Close()
 
 	pgStore := booking.NewPgStore(pool)
+
+	publisher := messaging.NewPublisher(rabbitmqURL, eventsExchange)
+	defer func() { _ = publisher.Close() }()
+	relay := outbox.NewRelay(pool, publisher, log.With(slog.String("component", "outbox_relay")))
+	defer runInBackground(ctx, relay.Run)()
 
 	events := booking.NewEventHandler(pgStore)
 	defer runInBackground(ctx, func(ctx context.Context) {

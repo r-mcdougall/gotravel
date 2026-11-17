@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -585,4 +586,62 @@ func bookingStatus(ctx context.Context, addr, token, id string) string {
 		return ""
 	}
 	return booking.Status
+}
+
+func TestRun_publishesSeatAvailabilityToRabbitMQ(t *testing.T) {
+	const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
+	resetFlight(t, flightID, 3)
+
+	// Messages published before the queue exists are dropped, so wait until the consumer has declared it.
+	started := &logSignal{match: "rabbitmq consumer started", ready: make(chan struct{})}
+	received := make(chan messaging.Delivery, 10)
+	ctx, cancel := context.WithCancel(t.Context())
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		messaging.Consume(ctx, rabbitmqURL, messaging.Subscription{
+			Exchange: "booking.events", RoutingKey: "flight.availability_changed", Queue: "test.booking-availability",
+		}, func(_ context.Context, d messaging.Delivery) error {
+			received <- d
+			return nil
+		}, slog.New(slog.NewTextHandler(started, nil)))
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-consumerDone
+	})
+	select {
+	case <-started.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("test consumer did not start")
+	}
+
+	addr, stop := startService(t)
+	code, body := send(t, http.MethodPost, "http://"+addr+"/api/v1/bookings", signToken(t, johnID), fmt.Sprintf(
+		`{"flight_id": %q, "passengers": [{"full_name": "John Doe", "birth_date": "1990-05-17"}]}`, flightID))
+	require.Equal(t, http.StatusCreated, code, body)
+
+	var delivery messaging.Delivery
+	select {
+	case delivery = <-received:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no flight.availability_changed event reached RabbitMQ")
+	}
+
+	require.Equal(t, "flight.availability_changed", delivery.Type)
+	var event struct {
+		EventID string `json:"event_id"`
+		Data    struct {
+			FlightID            string `json:"flight_id"`
+			AvailabilityVersion int64  `json:"availability_version"`
+			AvailableSeats      int32  `json:"available_seats"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(delivery.Body, &event))
+	require.Equal(t, delivery.ID, event.EventID)
+	require.Equal(t, flightID, event.Data.FlightID)
+	require.Equal(t, int64(1), event.Data.AvailabilityVersion)
+	require.Equal(t, int32(2), event.Data.AvailableSeats, "three seats, one held")
+
+	require.NoError(t, stop())
 }

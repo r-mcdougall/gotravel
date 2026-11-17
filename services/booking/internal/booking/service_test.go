@@ -90,6 +90,11 @@ func (s unusedStore) ExpireHolds(context.Context, int32) ([]store.ExpireHoldsRow
 	return nil, nil
 }
 
+func (s unusedStore) UpsertFlightInventory(context.Context, store.UpsertFlightInventoryParams) (store.FlightInventory, error) {
+	s.fail("UpsertFlightInventory")
+	return store.FlightInventory{}, nil
+}
+
 func (s unusedStore) InTx(context.Context, func(queries) error) error {
 	s.fail("InTx")
 	return nil
@@ -143,9 +148,9 @@ func TestServiceHold_reservesSeatsAndRecordsTheBooking(t *testing.T) {
 
 	inventory := getInventory(t, pool)
 	require.Equal(t, int32(2), inventory.HeldSeats)
-	require.Equal(t, int64(1), inventory.AvailabilityVersion)
+	require.Equal(t, int64(2), inventory.AvailabilityVersion, "1 when the flight arrived, 2 after the hold")
 	requireOutbox(t, pool,
-		fmt.Sprintf(`{"flight_id":%q,"availability_version":1,"available_seats":178}`, testFlightID))
+		fmt.Sprintf(`{"flight_id":%q,"availability_version":2,"available_seats":178}`, testFlightID))
 
 	fetched, err := svc.GetBooking(t.Context(), johnID, held.ID)
 	require.NoError(t, err)
@@ -275,10 +280,10 @@ func TestServiceCancelBooking_releasesTheSeatsOfAHeldBooking(t *testing.T) {
 
 	inventory := getInventory(t, pool)
 	require.Zero(t, inventory.HeldSeats)
-	require.Equal(t, int64(2), inventory.AvailabilityVersion)
+	require.Equal(t, int64(3), inventory.AvailabilityVersion)
 	requireOutbox(t, pool,
-		fmt.Sprintf(`{"flight_id":%q,"availability_version":1,"available_seats":178}`, testFlightID),
-		fmt.Sprintf(`{"flight_id":%q,"availability_version":2,"available_seats":180}`, testFlightID))
+		fmt.Sprintf(`{"flight_id":%q,"availability_version":2,"available_seats":178}`, testFlightID),
+		fmt.Sprintf(`{"flight_id":%q,"availability_version":3,"available_seats":180}`, testFlightID))
 
 	_, err = svc.CancelBooking(t.Context(), johnID, held.ID)
 	require.ErrorIs(t, err, ErrNotHeld)
@@ -296,7 +301,7 @@ func newTestService(t *testing.T) (*service, *pgxpool.Pool, time.Time) {
 func addFlight(t *testing.T, pool *pgxpool.Pool, id string, departure time.Time, capacity int32) {
 	t.Helper()
 
-	err := store.New(pool).UpsertFlightInventory(t.Context(), store.UpsertFlightInventoryParams{
+	_, err := store.New(pool).UpsertFlightInventory(t.Context(), store.UpsertFlightInventoryParams{
 		FlightID:        id,
 		Version:         1,
 		FlightNumber:    "GA410",

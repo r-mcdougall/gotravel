@@ -24,6 +24,7 @@ type queries interface {
 	CancelBooking(ctx context.Context, arg store.CancelBookingParams) (store.Booking, error)
 	InsertOutboxEvent(ctx context.Context, arg store.InsertOutboxEventParams) error
 	ExpireHolds(ctx context.Context, batchSize int32) ([]store.ExpireHoldsRow, error)
+	UpsertFlightInventory(ctx context.Context, arg store.UpsertFlightInventoryParams) (store.FlightInventory, error)
 }
 
 var _ queries = (*store.Queries)(nil)
@@ -47,7 +48,8 @@ func newService(db bookingStore, holdTTL time.Duration, now func() time.Time) *s
 	return &service{db: db, holdTTL: holdTTL, now: now}
 }
 
-// Hold reserves seats for every passenger and records the booking in one transaction, so two holds can never share the last seat.
+// Hold reserves seats for every passenger and records the booking in one transaction,
+// so two holds can never share the last seat.
 func (s *service) Hold(ctx context.Context, userID string, request HoldRequest) (Response, error) {
 	request.normalize()
 	if err := request.Validate(); err != nil {

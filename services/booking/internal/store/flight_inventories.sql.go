@@ -36,26 +36,28 @@ func (q *Queries) GetFlightInventory(ctx context.Context, flightID string) (Flig
 	return i, err
 }
 
-const upsertFlightInventory = `-- name: UpsertFlightInventory :exec
+const upsertFlightInventory = `-- name: UpsertFlightInventory :one
 INSERT INTO flight_inventories (
-    flight_id, version, flight_number, airline_code, origin_code,
-    destination_code, departure_at, arrival_at, price, capacity
+    flight_id, version, flight_number, airline_code, origin_code, destination_code,
+    departure_at, arrival_at, price, capacity, availability_version
 ) VALUES (
-    $1, $2, $3, $4, $5,
-    $6, $7, $8, $9, $10
+     $1, $2, $3, $4, $5, $6,
+     $7, $8, $9, $10, 1
 )
 ON CONFLICT (flight_id) DO UPDATE SET
-    version          = EXCLUDED.version,
-    flight_number    = EXCLUDED.flight_number,
-    airline_code     = EXCLUDED.airline_code,
-    origin_code      = EXCLUDED.origin_code,
-    destination_code = EXCLUDED.destination_code,
-    departure_at     = EXCLUDED.departure_at,
-    arrival_at       = EXCLUDED.arrival_at,
-    price            = EXCLUDED.price,
-    capacity         = EXCLUDED.capacity,
-    updated_at       = now()
+    version              = EXCLUDED.version,
+    flight_number        = EXCLUDED.flight_number,
+    airline_code         = EXCLUDED.airline_code,
+    origin_code          = EXCLUDED.origin_code,
+    destination_code     = EXCLUDED.destination_code,
+    departure_at         = EXCLUDED.departure_at,
+    arrival_at           = EXCLUDED.arrival_at,
+    price                = EXCLUDED.price,
+    capacity             = EXCLUDED.capacity,
+    availability_version = flight_inventories.availability_version + 1,
+    updated_at           = now()
 WHERE flight_inventories.version < EXCLUDED.version
+RETURNING flight_id, version, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, held_seats, sold_seats, availability_version, updated_at
 `
 
 type UpsertFlightInventoryParams struct {
@@ -71,8 +73,8 @@ type UpsertFlightInventoryParams struct {
 	Capacity        int32
 }
 
-func (q *Queries) UpsertFlightInventory(ctx context.Context, arg UpsertFlightInventoryParams) error {
-	_, err := q.db.Exec(ctx, upsertFlightInventory,
+func (q *Queries) UpsertFlightInventory(ctx context.Context, arg UpsertFlightInventoryParams) (FlightInventory, error) {
+	row := q.db.QueryRow(ctx, upsertFlightInventory,
 		arg.FlightID,
 		arg.Version,
 		arg.FlightNumber,
@@ -84,5 +86,22 @@ func (q *Queries) UpsertFlightInventory(ctx context.Context, arg UpsertFlightInv
 		arg.Price,
 		arg.Capacity,
 	)
-	return err
+	var i FlightInventory
+	err := row.Scan(
+		&i.FlightID,
+		&i.Version,
+		&i.FlightNumber,
+		&i.AirlineCode,
+		&i.OriginCode,
+		&i.DestinationCode,
+		&i.DepartureAt,
+		&i.ArrivalAt,
+		&i.Price,
+		&i.Capacity,
+		&i.HeldSeats,
+		&i.SoldSeats,
+		&i.AvailabilityVersion,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

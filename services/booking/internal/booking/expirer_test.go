@@ -58,10 +58,10 @@ func TestExpirerExpireBatch_expiresOverdueHoldsAndReleasesTheirSeats(t *testing.
 
 	inventory := getInventory(t, pool)
 	require.Equal(t, int32(1), inventory.HeldSeats, "only the fresh hold keeps its seat")
-	require.Equal(t, int64(4), inventory.AvailabilityVersion, "three holds and one release")
+	require.Equal(t, int64(5), inventory.AvailabilityVersion, "arrival, three holds and one release")
 	require.Equal(t, 6, count(t, pool, "outbox"), "four holds and one release per flight")
 	require.JSONEq(t,
-		fmt.Sprintf(`{"flight_id":%q,"availability_version":4,"available_seats":179}`, testFlightID),
+		fmt.Sprintf(`{"flight_id":%q,"availability_version":5,"available_seats":179}`, testFlightID),
 		latestEvent(t, pool, testFlightID))
 
 	n, err = expirer.expireBatch(t.Context())
