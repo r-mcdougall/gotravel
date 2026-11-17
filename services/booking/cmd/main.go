@@ -11,18 +11,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/r-mcdougall/gotravel/internal/platform/authn"
-
-	"github.com/r-mcdougall/gotravel/services/booking/internal/booking"
-
-	"github.com/r-mcdougall/gotravel/internal/platform/messaging"
-
 	"github.com/r-mcdougall/gotravel/internal/platform/config"
 	"github.com/r-mcdougall/gotravel/internal/platform/database"
 	"github.com/r-mcdougall/gotravel/internal/platform/health"
 	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
 	"github.com/r-mcdougall/gotravel/internal/platform/logging"
+	"github.com/r-mcdougall/gotravel/internal/platform/messaging"
 	"github.com/r-mcdougall/gotravel/internal/platform/metrics"
+	"github.com/r-mcdougall/gotravel/services/booking/internal/booking"
 	"github.com/r-mcdougall/gotravel/services/booking/migrations"
 )
 
@@ -34,7 +33,7 @@ const (
 var flightChanged = messaging.Subscription{
 	Exchange:   "catalog.events",
 	RoutingKey: "flight.changed",
-	Queue:      "booking.flight.changed",
+	Queue:      "booking.flight-changed",
 }
 
 func main() {
@@ -94,23 +93,38 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	defer pool.Close()
 
 	pgStore := booking.NewPgStore(pool)
-	events := booking.NewEventHandler(pgStore)
-	consumerCtx, stopConsumer := context.WithCancel(ctx)
-	consumerDone := make(chan struct{})
-	go func() {
-		defer close(consumerDone)
 
-		consumerLogger := log.With(slog.String("component", "flight_changed_consumer"))
-		messaging.Consume(consumerCtx, rabbitmqURL, flightChanged, events.HandleFlightChanged, consumerLogger)
-	}()
-	defer func() {
-		stopConsumer()
-		<-consumerDone
-	}()
+	events := booking.NewEventHandler(pgStore)
+	defer runInBackground(ctx, func(ctx context.Context) {
+		messaging.Consume(ctx, rabbitmqURL, flightChanged, events.HandleFlightChanged,
+			log.With(slog.String("component", "flight_changed_consumer")))
+	})()
+
+	expiredHolds := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "booking_holds_expired_total",
+		Help: "Holds that expired before they were paid or cancelled.",
+	})
+	appMetrics.Registry().MustRegister(expiredHolds)
+	expirer := booking.NewExpirer(pgStore, expiredHolds, log.With(slog.String("component", "hold_expirer")))
+	defer runInBackground(ctx, expirer.Run)()
 
 	service := booking.NewService(pgStore, holdTTL)
 	handler := booking.NewHandler(service, log, authn.NewVerifier(publicKey))
 
 	router := httpserver.NewRouter(log, appMetrics, handler.Routes)
 	return httpserver.Run(ctx, log, httpserver.New(base.HTTPAddr, router), base.ShutdownTimeout)
+}
+
+func runInBackground(ctx context.Context, fn func(context.Context)) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn(ctx)
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
 }

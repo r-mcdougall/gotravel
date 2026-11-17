@@ -94,6 +94,45 @@ type CreatePassengersParams struct {
 	BirthDate time.Time
 }
 
+const expireHolds = `-- name: ExpireHolds :many
+UPDATE bookings
+SET status = 'EXPIRED', updated_at = now()
+WHERE id IN (
+    SELECT id FROM bookings
+    WHERE status = 'HELD' AND expires_at <= now()
+    ORDER BY expires_at
+    LIMIT $1
+        FOR UPDATE SKIP LOCKED
+)
+RETURNING id, flight_id, passenger_count
+`
+
+type ExpireHoldsRow struct {
+	ID             string
+	FlightID       string
+	PassengerCount int32
+}
+
+func (q *Queries) ExpireHolds(ctx context.Context, batchSize int32) ([]ExpireHoldsRow, error) {
+	rows, err := q.db.Query(ctx, expireHolds, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ExpireHoldsRow
+	for rows.Next() {
+		var i ExpireHoldsRow
+		if err := rows.Scan(&i.ID, &i.FlightID, &i.PassengerCount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getBooking = `-- name: GetBooking :one
 SELECT bookings.id, bookings.user_id, bookings.flight_id, bookings.status, bookings.passenger_count, bookings.seat_price, bookings.expires_at, bookings.created_at, bookings.updated_at, flight_inventories.flight_id, flight_inventories.version, flight_inventories.flight_number, flight_inventories.airline_code, flight_inventories.origin_code, flight_inventories.destination_code, flight_inventories.departure_at, flight_inventories.arrival_at, flight_inventories.price, flight_inventories.capacity, flight_inventories.held_seats, flight_inventories.sold_seats, flight_inventories.availability_version, flight_inventories.updated_at
 FROM bookings

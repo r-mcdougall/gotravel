@@ -85,6 +85,11 @@ func (s unusedStore) InsertOutboxEvent(context.Context, store.InsertOutboxEventP
 	return nil
 }
 
+func (s unusedStore) ExpireHolds(context.Context, int32) ([]store.ExpireHoldsRow, error) {
+	s.fail("ExpireHolds")
+	return nil, nil
+}
+
 func (s unusedStore) InTx(context.Context, func(queries) error) error {
 	s.fail("InTx")
 	return nil
