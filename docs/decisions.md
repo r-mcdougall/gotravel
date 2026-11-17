@@ -143,4 +143,21 @@
 - **Decision:** messages are published with `mandatory=false`, so the broker confirms and discards a message that no queue is bound for. Consumers create their queues when they start.
 - **Rejected:** `mandatory=true` with return handling (rows would wait in the outbox until a consumer exists, but an unread return channel can stall the client); a definitions file that creates every queue when the broker starts (queue arguments written in two places).
 - **Trade-off:** a consumer that starts after events were published never receives them. In development, run `make reset && make seed` after adding a consumer; a real deployment would need a backfill.
-  
+
+## 25. Seat counters live on the booking inventory
+
+- **Decision:** `flight_inventories` keeps `held_seats` and `sold_seats` next to the capacity copied from the catalog. A hold is one conditional `UPDATE` (not departed, enough free seats) in the same transaction that inserts the booking, its passengers and an outbox event. Cancelling releases the seats the same way.
+- **Rejected:** counting seats with `SUM` over bookings (every hold would have to lock the flight row first); `SELECT ... FOR UPDATE` and a check in Go (two round trips for the same guarantee).
+- **Trade-off:** every status change must update the counters in its own transaction. A capacity lowered by the catalog can leave a negative balance, which is reported as zero free seats.
+
+## 26. Holds are short, small and not deduplicated
+
+- **Decision:** a hold lasts `HOLD_TTL` (15 minutes by default) and takes 1 to 9 passengers, the same limit as search. A passenger is a full name and a birth date. The seat price is copied into the booking when the hold is made; the total is the seat price times the passengers and is not stored.
+- **Rejected:** identity or passport numbers (not needed for a mock payment, and sensitive); idempotency keys and a limit on holds per user.
+- **Trade-off:** a retried request creates a second hold, and one user can hold many seats. Both are released when the holds expire, in line with the accepted risks of decision 11.
+
+## 27. Bookings are private to their owner and use UTC
+
+- **Decision:** every booking route needs an access token. Reads and cancel filter by the token's subject, so another user's booking answers 404, not 403. Times are returned in UTC because booking does not keep airport time zones.
+- **Rejected:** 403 for other users' bookings (it confirms that the id exists); adding airport time zones to `flight.changed`.
+- **Trade-off:** clients convert to local time themselves, unlike catalog responses, which use each airport's offset.
