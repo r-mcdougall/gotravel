@@ -29,6 +29,12 @@ const (
 	eventsExchange = "payment.events"
 )
 
+var paymentRejected = messaging.Subscription{
+	Exchange:   "booking.events",
+	RoutingKey: "payment.rejected",
+	Queue:      "payment.payment-rejected",
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -91,6 +97,12 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	defer func() { _ = publisher.Close() }()
 	relay := outbox.NewRelay(pool, publisher, log.With(slog.String("component", "outbox_relay")))
 	defer runInBackground(ctx, relay.Run)()
+
+	events := payment.NewEventHandler(pgStore)
+	defer runInBackground(ctx, func(ctx context.Context) {
+		messaging.Consume(ctx, rabbitmqURL, paymentRejected, events.HandlePaymentRejected,
+			log.With(slog.String("component", "payment_rejected_consumer")))
+	})()
 
 	service := payment.NewService(pgStore, payment.NewBookingClient(bookingURL))
 	handler := payment.NewHandler(service, log, authn.NewVerifier(publicKey))

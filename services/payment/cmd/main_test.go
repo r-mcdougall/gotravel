@@ -31,7 +31,8 @@ import (
 // rabbitmqURL is a throwaway RabbitMQ the service publishes payment events to.
 var rabbitmqURL string
 
-// testSigningKey signs the tokens the tests send; its public half is what the service under test loads from JWT_PUBLIC_KEY_FILE.
+// testSigningKey signs the tokens the tests send; its public half is what the
+// service under test loads from JWT_PUBLIC_KEY_FILE.
 var testSigningKey ed25519.PrivateKey
 
 func TestMain(m *testing.M) {
@@ -466,25 +467,45 @@ func TestRun_answersServiceUnavailableWhenBookingIsDown(t *testing.T) {
 	require.NoError(t, stop())
 }
 
-// logSignal closes ready once a log line containing match is written.
+// logSignal closes ready once a log line containing every match is written.
 type logSignal struct {
-	match string
+	match []string
 	ready chan struct{}
 	once  sync.Once
 }
 
 func (s *logSignal) Write(p []byte) (int, error) {
-	if bytes.Contains(p, []byte(s.match)) {
-		s.once.Do(func() { close(s.ready) })
+	for _, m := range s.match {
+		if !bytes.Contains(p, []byte(m)) {
+			return len(p), nil
+		}
 	}
+	s.once.Do(func() { close(s.ready) })
 	return len(p), nil
+}
+
+// startServiceWithConsumer starts the service and waits until the consumer logging as component
+// has declared its queue, since messages published before that are dropped.
+func startServiceWithConsumer(t *testing.T, component string) (addr string, stop func() error) {
+	t.Helper()
+	started := &logSignal{
+		match: []string{"rabbitmq consumer started", `"component":"` + component + `"`},
+		ready: make(chan struct{}),
+	}
+	addr, stop = startServiceWithLogs(t, started)
+	select {
+	case <-started.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s did not start", component)
+	}
+	return addr, stop
 }
 
 func TestRun_publishesPaymentSucceededToRabbitMQ(t *testing.T) {
 	truncatePaymentTables(t)
 
 	// Messages published before the queue exists are dropped, so wait until the consumer has declared it.
-	started := &logSignal{match: "rabbitmq consumer started", ready: make(chan struct{})}
+	started := &logSignal{match: []string{"rabbitmq consumer started"}, ready: make(chan struct{})}
 	received := make(chan messaging.Delivery, 10)
 	ctx, cancel := context.WithCancel(t.Context())
 	consumerDone := make(chan struct{})
@@ -540,4 +561,60 @@ func TestRun_publishesPaymentSucceededToRabbitMQ(t *testing.T) {
 	require.Equal(t, int64(2_500_000), event.Data.Amount)
 
 	require.NoError(t, stop())
+}
+
+func TestRun_reversesAPaymentBookingRejected(t *testing.T) {
+	truncatePaymentTables(t)
+	john := signToken(t, johnID)
+	startFakeBooking(t, john)
+	addr, stop := startServiceWithConsumer(t, "payment_rejected_consumer")
+	payments := "http://" + addr + "/api/v1/payments"
+
+	code, body := send(t, http.MethodPost, payments, john, fmt.Sprintf(`{"booking_id": %q}`, heldBookingID))
+	require.Equal(t, http.StatusCreated, code, body)
+	var paid struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &paid))
+
+	publisher := messaging.NewPublisher(rabbitmqURL, "booking.events")
+	t.Cleanup(func() { _ = publisher.Close() })
+	require.NoError(t, publisher.Publish(t.Context(), []messaging.Message{{
+		ID: "3a2f1e0d-9c8b-4a7f-a6e5-d4c3b2a1908f", Type: "payment.rejected", Timestamp: time.Now(),
+		Body: []byte(fmt.Sprintf(`{
+			"event_id": "3a2f1e0d-9c8b-4a7f-a6e5-d4c3b2a1908f",
+			"type": "payment.rejected",
+			"occurred_at": "2026-11-19T10:00:05Z",
+			"data": {"payment_id": %q, "booking_id": %q, "reason": "booking_expired"}
+		}`, paid.ID, heldBookingID)),
+	}}))
+
+	require.Eventually(t, func() bool {
+		return paymentStatus(t.Context(), payments+"/"+paid.ID, john) == "REVERSED"
+	}, 10*time.Second, 50*time.Millisecond, "the event reverses the payment")
+
+	require.NoError(t, stop())
+}
+
+// paymentStatus returns the status of a payment, or "" when it cannot be read; safe inside require.Eventually.
+func paymentStatus(ctx context.Context, url, token string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var payment struct {
+		Status string `json:"status"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&payment) != nil {
+		return ""
+	}
+	return payment.Status
 }
