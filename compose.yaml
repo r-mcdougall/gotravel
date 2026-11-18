@@ -141,8 +141,16 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://payment_svc:${PAYMENT_DB_PASSWORD:?set PAYMENT_DB_PASSWORD in .env}@postgres:5432/payment
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:?set RABBITMQ_USER in .env}:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public_key
+      # Read on every payment; while booking is down, payments answer 503.
+      BOOKING_URL: http://booking:8080
+    secrets:
+      - jwt_public_key
     depends_on:
       postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "/app", "-healthcheck"]
