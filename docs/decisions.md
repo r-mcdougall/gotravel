@@ -167,3 +167,22 @@
 - **Decision:** every change to a flight's free seats in booking (a hold, a cancel, an expiry and every applied `flight.changed`) increments `availability_version` and records `flight.availability_changed` with `flight_id`, `availability_version` and the absolute `available_seats`, in the same transaction. The catalog applies a report only when its version is newer and then forgets the cached route-day. An admin capacity change still moves `available_seats` in the catalog at once (decision 17); the next report from booking overwrites it.
 - **Rejected:** seat deltas (a lost or repeated message would skew the count for good); reporting only when the capacity changes (the upsert would have to compare old and new values).
 - **Trade-off:** search trails a hold by the relay and consumer delay. A price-only change sends a report that changes nothing, and the expirer sends one report per flight per batch.
+
+## 29. Payment reads the bill from booking with the caller's token
+
+- **Decision:** `POST /api/v1/payments` takes only a `booking_id`. Payment reads the booking from booking's public API with the caller's own `Authorization` header (2-second timeout), so booking checks ownership, and charges `total_price` only when the booking is `HELD` and `expires_at` is still ahead. The payment and its `payment.succeeded` event are written in one transaction.
+- **Rejected:** the amount in the request (a client could pay any amount); a copy of bookings in payment fed by events (a second consumer and table for one read); a service-to-service token (new auth machinery for one call).
+- **Trade-off:** payments need booking to be up; while it is not, payment answers 503 `BOOKING_UNAVAILABLE` and charges nothing. The deadline check uses payment's clock, and the booking can still expire before the confirmation arrives (decision 31).
+
+## 30. The client picks the mock outcome; one success per booking
+
+- **Decision:** the request's `outcome` (`succeeded` by default, or `failed`) decides the result. Every attempt is stored; a failed one sends no event and can be retried. A partial unique index allows one `SUCCEEDED` payment per booking, so a retried or concurrent second success answers 409 `ALREADY_PAID`.
+- **Rejected:** a random outcome (tests and demos would not be repeatable); magic card numbers (realism nothing else uses); idempotency keys (the unique index already prevents a double charge).
+- **Trade-off:** anyone can choose a failed payment, which is the point of a mock. A payment reversed by decision 31 frees the index, but the booking is no longer payable by then.
+
+## 31. Bookings are confirmed by event; late payments are reversed
+
+- **Decision:** booking consumes `payment.succeeded` and, in one transaction, confirms a booking that is still `HELD`, stores the `payment_id` and moves its seats from held to sold. Free seats do not change, so no availability report is sent. The expirer and the confirmation lock the same row, so exactly one wins. A booking that is no longer held answers with `payment.rejected` (`booking_expired`, `booking_cancelled`, `booking_not_found` or `booking_paid_by_another_payment`), and payment marks that payment `REVERSED`. A repeated message for a booking confirmed by the same payment changes nothing.
+- **Rejected:** payment calling booking to confirm synchronously (a charged payment would need its own retry when booking is down); refusing a confirmation after `expires_at` (a payment made in time would lose to delivery delay); a refund flow.
+- **Trade-off:** a paid booking stays `HELD` for the relay and consumer delay, about a second. A rejected payment shows `SUCCEEDED` until the reversal arrives, and nobody is notified of the reversal.
+  

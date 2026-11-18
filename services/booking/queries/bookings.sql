@@ -16,6 +16,13 @@ SET held_seats           = held_seats - @seats,
 WHERE flight_id = @flight_id
 RETURNING *;
 
+-- name: SellHeldSeats :exec
+UPDATE flight_inventories
+SET held_seats = held_seats - @seats,
+    sold_seats = sold_seats + @seats,
+    updated_at = now()
+WHERE flight_id = @flight_id;
+
 -- name: CreateBooking :one
 INSERT INTO bookings (user_id, flight_id, status, passenger_count, seat_price, expires_at)
 VALUES (@user_id, @flight_id, 'HELD', @passenger_count, @seat_price, @expires_at)
@@ -52,6 +59,15 @@ UPDATE bookings
 SET status = 'CANCELLED', updated_at = now()
 WHERE id = @id AND user_id = @user_id AND status = 'HELD'
 RETURNING *;
+
+-- name: ConfirmBooking :one
+UPDATE bookings
+SET status = 'CONFIRMED', payment_id = @payment_id::uuid, updated_at = now()
+WHERE id = @id AND status = 'HELD'
+RETURNING *;
+
+-- name: GetBookingPayment :one
+SELECT status, payment_id FROM bookings WHERE id = @id;
 
 -- name: ExpireHolds :many
 UPDATE bookings

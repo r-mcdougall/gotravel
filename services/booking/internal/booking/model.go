@@ -35,6 +35,7 @@ type Response struct {
 	SeatPrice      int64               `json:"seat_price"`
 	TotalPrice     int64               `json:"total_price"`
 	ExpiresAt      time.Time           `json:"expires_at"`
+	PaymentID      *string             `json:"payment_id"`
 	CreatedAt      time.Time           `json:"created_at"`
 	UpdatedAt      time.Time           `json:"updated_at"`
 }

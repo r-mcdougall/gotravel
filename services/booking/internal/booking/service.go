@@ -25,6 +25,9 @@ type queries interface {
 	InsertOutboxEvent(ctx context.Context, arg store.InsertOutboxEventParams) error
 	ExpireHolds(ctx context.Context, batchSize int32) ([]store.ExpireHoldsRow, error)
 	UpsertFlightInventory(ctx context.Context, arg store.UpsertFlightInventoryParams) (store.FlightInventory, error)
+	ConfirmBooking(ctx context.Context, arg store.ConfirmBookingParams) (store.Booking, error)
+	GetBookingPayment(ctx context.Context, id string) (store.GetBookingPaymentRow, error)
+	SellHeldSeats(ctx context.Context, arg store.SellHeldSeatsParams) error
 }
 
 var _ queries = (*store.Queries)(nil)
@@ -270,6 +273,7 @@ func toResponse(booking store.Booking, flight store.FlightInventory, passengers 
 		SeatPrice:      booking.SeatPrice,
 		TotalPrice:     booking.SeatPrice * int64(booking.PassengerCount),
 		ExpiresAt:      booking.ExpiresAt.UTC(),
+		PaymentID:      booking.PaymentID,
 		CreatedAt:      booking.CreatedAt.UTC(),
 		UpdatedAt:      booking.UpdatedAt.UTC(),
 	}

@@ -18,6 +18,7 @@ type Booking struct {
 	ExpiresAt      time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	PaymentID      *string
 }
 
 type FlightInventory struct {
