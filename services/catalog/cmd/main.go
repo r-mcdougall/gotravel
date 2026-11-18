@@ -34,6 +34,12 @@ const (
 	defaultSearchCacheTTL = 60 * time.Second
 )
 
+var availabilityChanged = messaging.Subscription{
+	Exchange:   "booking.events",
+	RoutingKey: "flight.availability_changed",
+	Queue:      "catalog.flight-availability-changed",
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -98,23 +104,20 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 
 	publisher := messaging.NewPublisher(rabbitmqURL, eventsExchange)
 	defer func() { _ = publisher.Close() }()
-
-	relayCtx, stopRelay := context.WithCancel(ctx)
-	relayDone := make(chan struct{})
-	go func() {
-		defer close(relayDone)
-		outbox.NewRelay(pool, publisher, log.With(slog.String("component", "outbox_relay"))).Run(relayCtx)
-	}()
-	defer func() {
-		stopRelay()
-		<-relayDone
-	}()
+	relay := outbox.NewRelay(pool, publisher, log.With(slog.String("component", "outbox_relay")))
+	defer runInBackground(ctx, relay.Run)()
 
 	pgStore := catalog.NewPgStore(pool)
 	reference, err := catalog.LoadReference(ctx, pgStore)
 	if err != nil {
 		return fmt.Errorf("load reference data: %w", err)
 	}
+
+	events := catalog.NewEventHandler(pgStore, reference, routeCache)
+	defer runInBackground(ctx, func(ctx context.Context) {
+		messaging.Consume(ctx, rabbitmqURL, availabilityChanged, events.HandleAvailabilityChanged,
+			log.With(slog.String("component", "availability_consumer")))
+	})()
 
 	service := catalog.NewService(pgStore, reference, routeCache)
 	handler := catalog.NewHandler(service, log, authn.NewVerifier(publicKey))
@@ -138,4 +141,19 @@ func newSearchCache(
 
 	log.InfoContext(ctx, "search cache enabled", slog.Duration("ttl", ttl))
 	return catalog.NewRouteDayCache(client, ttl, log, registerer), func() { _ = client.Close() }, nil
+}
+
+// runInBackground starts fn and returns a function that stops it and waits until it has returned.
+func runInBackground(ctx context.Context, fn func(context.Context)) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn(ctx)
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
 }

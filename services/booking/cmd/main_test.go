@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -29,7 +30,8 @@ import (
 // rabbitmqURL is a throwaway RabbitMQ the service consumes catalog events from.
 var rabbitmqURL string
 
-// testSigningKey signs the tokens the tests send; its public half is what the service under test loads from JWT_PUBLIC_KEY_FILE.
+// testSigningKey signs the tokens the tests send; its public half is what the
+// service under test loads from JWT_PUBLIC_KEY_FILE.
 var testSigningKey ed25519.PrivateKey
 
 func TestMain(m *testing.M) {
@@ -528,6 +530,118 @@ func TestRun_userHoldsListsAndCancelsABooking(t *testing.T) {
 
 	code, body = send(t, http.MethodPost, bookings, jane, holdBody)
 	require.Equal(t, http.StatusCreated, code, body, "the cancelled seats can be held again")
+
+	require.NoError(t, stop())
+}
+
+func TestRun_expiresHoldsThatAreNotPaidInTime(t *testing.T) {
+	const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
+	resetFlight(t, flightID, 3)
+	t.Setenv("HOLD_TTL", "1s")
+	addr, stop := startService(t)
+	john := signToken(t, johnID)
+
+	code, body := fetch(t, "http://"+addr+"/metrics")
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, body, "booking_holds_expired_total 0")
+
+	code, body = send(t, http.MethodPost, "http://"+addr+"/api/v1/bookings", john, fmt.Sprintf(
+		`{"flight_id": %q, "passengers": [{"full_name": "John Doe", "birth_date": "1990-05-17"}]}`, flightID))
+	require.Equal(t, http.StatusCreated, code, body)
+	var held struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &held))
+
+	require.Eventually(t, func() bool {
+		return bookingStatus(t.Context(), addr, john, held.ID) == "EXPIRED"
+	}, 15*time.Second, 100*time.Millisecond, "the expirer runs every 5 seconds")
+
+	require.Zero(t, queryCount(t, `SELECT held_seats FROM flight_inventories`), "the seat is released")
+	code, body = fetch(t, "http://"+addr+"/metrics")
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, body, "booking_holds_expired_total 1")
+
+	require.NoError(t, stop())
+}
+
+// bookingStatus returns the status of a booking, or "" when it cannot be read; safe inside require.Eventually.
+func bookingStatus(ctx context.Context, addr, token, id string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/v1/bookings/"+id, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var booking struct {
+		Status string `json:"status"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&booking) != nil {
+		return ""
+	}
+	return booking.Status
+}
+
+func TestRun_publishesSeatAvailabilityToRabbitMQ(t *testing.T) {
+	const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
+	resetFlight(t, flightID, 3)
+
+	// Messages published before the queue exists are dropped, so wait until the consumer has declared it.
+	started := &logSignal{match: "rabbitmq consumer started", ready: make(chan struct{})}
+	received := make(chan messaging.Delivery, 10)
+	ctx, cancel := context.WithCancel(t.Context())
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		messaging.Consume(ctx, rabbitmqURL, messaging.Subscription{
+			Exchange: "booking.events", RoutingKey: "flight.availability_changed", Queue: "test.booking-availability",
+		}, func(_ context.Context, d messaging.Delivery) error {
+			received <- d
+			return nil
+		}, slog.New(slog.NewTextHandler(started, nil)))
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-consumerDone
+	})
+	select {
+	case <-started.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("test consumer did not start")
+	}
+
+	addr, stop := startService(t)
+	code, body := send(t, http.MethodPost, "http://"+addr+"/api/v1/bookings", signToken(t, johnID), fmt.Sprintf(
+		`{"flight_id": %q, "passengers": [{"full_name": "John Doe", "birth_date": "1990-05-17"}]}`, flightID))
+	require.Equal(t, http.StatusCreated, code, body)
+
+	var delivery messaging.Delivery
+	select {
+	case delivery = <-received:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no flight.availability_changed event reached RabbitMQ")
+	}
+
+	require.Equal(t, "flight.availability_changed", delivery.Type)
+	var event struct {
+		EventID string `json:"event_id"`
+		Data    struct {
+			FlightID            string `json:"flight_id"`
+			AvailabilityVersion int64  `json:"availability_version"`
+			AvailableSeats      int32  `json:"available_seats"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(delivery.Body, &event))
+	require.Equal(t, delivery.ID, event.EventID)
+	require.Equal(t, flightID, event.Data.FlightID)
+	require.Equal(t, int64(1), event.Data.AvailabilityVersion)
+	require.Equal(t, int32(2), event.Data.AvailableSeats, "three seats, one held")
 
 	require.NoError(t, stop())
 }

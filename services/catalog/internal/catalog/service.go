@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -269,24 +268,7 @@ func (s *service) flightsOnRouteDay(ctx context.Context, request SearchFlightsRe
 
 // invalidateRouteDays forgets the cached route days of the flights a committed write touched.
 func (s *service) invalidateRouteDays(ctx context.Context, flights ...store.Flight) {
-	var days []routeDay
-	for _, flight := range flights {
-		origin, ok := s.reference.Airport(flight.OriginCode)
-		if !ok {
-			continue // a stored flight always names an airport from the reference data
-		}
-
-		day := routeDay{
-			Origin:      flight.OriginCode,
-			Destination: flight.DestinationCode,
-			Date:        flight.DepartureAt.In(origin.Location).Format(time.DateOnly),
-		}
-		if !slices.Contains(days, day) {
-			days = append(days, day)
-		}
-	}
-
-	s.cache.invalidate(ctx, days...)
+	s.cache.forget(ctx, s.reference, flights...)
 }
 
 func newFlightList(data []FlightResponse, page, pageSize int32, total int64) FlightListResponse {

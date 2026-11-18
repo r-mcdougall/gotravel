@@ -52,3 +52,15 @@ UPDATE bookings
 SET status = 'CANCELLED', updated_at = now()
 WHERE id = @id AND user_id = @user_id AND status = 'HELD'
 RETURNING *;
+
+-- name: ExpireHolds :many
+UPDATE bookings
+SET status = 'EXPIRED', updated_at = now()
+WHERE id IN (
+    SELECT id FROM bookings
+    WHERE status = 'HELD' AND expires_at <= now()
+    ORDER BY expires_at
+    LIMIT @batch_size
+        FOR UPDATE SKIP LOCKED
+)
+RETURNING id, flight_id, passenger_count;

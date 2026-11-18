@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -113,4 +114,30 @@ func (c *RouteDayCache) invalidate(ctx context.Context, days ...routeDay) {
 	if err := c.cache.Delete(context.WithoutCancel(ctx), keys...); err != nil {
 		c.log.WarnContext(ctx, "could not invalidate search cache, entries expire after the TTL", slog.Any("keys", keys), slog.Any("error", err))
 	}
+}
+
+// forget drops the cached route-days of flights. A flight's day is the local date at its origin airport.
+func (c *RouteDayCache) forget(ctx context.Context, reference *Reference, flights ...store.Flight) {
+	if c == nil {
+		return
+	}
+
+	var days []routeDay
+	for _, flight := range flights {
+		origin, ok := reference.Airport(flight.OriginCode)
+		if !ok {
+			continue // a stored flight always names an airport from the reference data
+		}
+
+		day := routeDay{
+			Origin:      flight.OriginCode,
+			Destination: flight.DestinationCode,
+			Date:        flight.DepartureAt.In(origin.Location).Format(time.DateOnly),
+		}
+		if !slices.Contains(days, day) {
+			days = append(days, day)
+		}
+	}
+
+	c.invalidate(ctx, days...)
 }

@@ -132,12 +132,17 @@ func fetch(t *testing.T, url string) (int, string) {
 // stop shuts it down and returns what run returned.
 func startService(t *testing.T) (addr string, stop func() error) {
 	t.Helper()
+	return startServiceWithLogs(t, io.Discard)
+}
+
+func startServiceWithLogs(t *testing.T, logs io.Writer) (addr string, stop func() error) {
+	t.Helper()
 	addr = freeAddr(t)
 	t.Setenv("HTTP_ADDR", addr)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, nil, io.Discard) }()
+	go func() { done <- run(ctx, nil, logs) }()
 
 	require.Eventually(t, func() bool {
 		code, _ := fetch(t, "http://"+addr+"/healthz")
@@ -847,4 +852,74 @@ func TestRun_publishesFlightChangesToRabbitMQ(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "the relay marks the event published")
 
 	require.NoError(t, stop())
+}
+
+func TestRun_appliesSeatAvailabilityFromBookingAndForgetsTheCachedDay(t *testing.T) {
+	truncateFlights(t)
+	t.Setenv("REDIS_URL", redisURL)
+
+	// Messages published before the queue exists are dropped, so wait until the consumer has declared it.
+	started := &logSignal{match: "rabbitmq consumer started", ready: make(chan struct{})}
+	addr, stop := startServiceWithLogs(t, started)
+	select {
+	case <-started.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("availability consumer did not start")
+	}
+
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	departure, date := nextWeek()
+	searchURL := "http://" + addr + "/api/v1/flights?origin=CGK&destination=DPS&date=" + date
+	id := createFlightOnRoute(t, addr, admin, "GA410", departure, 1_250_000)
+	require.Equal(t, 180, searchSeats(t.Context(), searchURL), "search caches the day with every seat free")
+
+	publisher := messaging.NewPublisher(rabbitmqURL, "booking.events")
+	t.Cleanup(func() { _ = publisher.Close() })
+	report := func(version int64, seats int) {
+		t.Helper()
+		body := fmt.Sprintf(`{"event_id": "6a1c0e55-1c7e-4c63-9a52-0b1d6b0f2d3e", "type": "flight.availability_changed",
+			"occurred_at": "2026-11-18T10:00:00Z",
+			"data": {"flight_id": %q, "availability_version": %d, "available_seats": %d}}`, id, version, seats)
+		require.NoError(t, publisher.Publish(t.Context(), []messaging.Message{{
+			ID: fmt.Sprintf("00000000-0000-4000-8000-%012d", version), Type: "flight.availability_changed",
+			Timestamp: time.Now(), Body: []byte(body),
+		}}))
+	}
+
+	report(2, 42)
+	require.Eventually(t, func() bool {
+		return searchSeats(t.Context(), searchURL) == 42
+	}, 10*time.Second, 50*time.Millisecond, "the cached day is forgotten, so search shows the new count")
+
+	report(1, 7)
+	report(3, 41)
+	require.Eventually(t, func() bool {
+		return searchSeats(t.Context(), searchURL) == 41
+	}, 10*time.Second, 50*time.Millisecond)
+	require.Equal(t, 41, queryCount(t, `SELECT available_seats FROM flights`), "the older report was ignored")
+
+	require.NoError(t, stop())
+}
+
+// searchSeats returns the free seats of the first flight a search finds, or -1; safe inside require.Eventually.
+func searchSeats(ctx context.Context, url string) int {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return -1
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return -1
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var list struct {
+		Data []struct {
+			AvailableSeats int `json:"available_seats"`
+		} `json:"data"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&list) != nil || len(list.Data) == 0 {
+		return -1
+	}
+	return list.Data[0].AvailableSeats
 }

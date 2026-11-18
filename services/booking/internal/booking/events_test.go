@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
@@ -37,16 +38,29 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-type fakeInventoryStore struct {
-	t      *testing.T
-	upsert func(ctx context.Context, arg store.UpsertFlightInventoryParams) error
+// recordingStore runs the handler's transaction against recordingQueries; any other call fails the test.
+type recordingStore struct {
+	unusedStore
+	q *recordingQueries
 }
 
-func (f *fakeInventoryStore) UpsertFlightInventory(ctx context.Context, arg store.UpsertFlightInventoryParams) error {
-	if f.upsert == nil {
-		f.t.Fatal("unexpected call to UpsertFlightInventory")
-	}
-	return f.upsert(ctx, arg)
+func (s recordingStore) InTx(_ context.Context, fn func(queries) error) error {
+	return fn(s.q)
+}
+
+type recordingQueries struct {
+	unusedStore
+	upsert func(arg store.UpsertFlightInventoryParams) (store.FlightInventory, error)
+	events []store.InsertOutboxEventParams
+}
+
+func (q *recordingQueries) UpsertFlightInventory(_ context.Context, arg store.UpsertFlightInventoryParams) (store.FlightInventory, error) {
+	return q.upsert(arg)
+}
+
+func (q *recordingQueries) InsertOutboxEvent(_ context.Context, arg store.InsertOutboxEventParams) error {
+	q.events = append(q.events, arg)
+	return nil
 }
 
 // flightChangedDelivery builds the message the catalog publishes for one version of the test flight.
@@ -68,12 +82,13 @@ func flightChangedDelivery(version int32, price int64, capacity int32) messaging
 	return messaging.Delivery{ID: "6a1c0e55-1c7e-4c63-9a52-0b1d6b0f2d3e", Type: eventFlightChanged, Body: []byte(body)}
 }
 
-func TestEventHandlerHandleFlightChanged_upsertsTheFlightFromTheEvent(t *testing.T) {
+func TestEventHandlerHandleFlightChanged_upsertsTheFlightAndReportsItsAvailability(t *testing.T) {
 	var got store.UpsertFlightInventoryParams
-	handler := NewEventHandler(&fakeInventoryStore{t: t, upsert: func(_ context.Context, arg store.UpsertFlightInventoryParams) error {
+	q := &recordingQueries{unusedStore: unusedStore{t}, upsert: func(arg store.UpsertFlightInventoryParams) (store.FlightInventory, error) {
 		got = arg
-		return nil
-	}})
+		return store.FlightInventory{FlightID: arg.FlightID, Capacity: arg.Capacity, HeldSeats: 4, AvailabilityVersion: 7}, nil
+	}}
+	handler := NewEventHandler(recordingStore{unusedStore: unusedStore{t}, q: q})
 
 	require.NoError(t, handler.HandleFlightChanged(t.Context(), flightChangedDelivery(2, 1_250_000, 180)))
 
@@ -89,10 +104,25 @@ func TestEventHandlerHandleFlightChanged_upsertsTheFlightFromTheEvent(t *testing
 		Price:           1_250_000,
 		Capacity:        180,
 	}, got)
+	require.Len(t, q.events, 1)
+	require.Equal(t, "flight.availability_changed", q.events[0].EventType)
+	require.JSONEq(t,
+		fmt.Sprintf(`{"flight_id":%q,"availability_version":7,"available_seats":176}`, testFlightID),
+		string(q.events[0].Payload))
+}
+
+func TestEventHandlerHandleFlightChanged_reportsNothingForAnIgnoredVersion(t *testing.T) {
+	q := &recordingQueries{unusedStore: unusedStore{t}, upsert: func(store.UpsertFlightInventoryParams) (store.FlightInventory, error) {
+		return store.FlightInventory{}, pgx.ErrNoRows
+	}}
+	handler := NewEventHandler(recordingStore{unusedStore: unusedStore{t}, q: q})
+
+	require.NoError(t, handler.HandleFlightChanged(t.Context(), flightChangedDelivery(1, 1_250_000, 180)))
+	require.Empty(t, q.events)
 }
 
 func TestEventHandlerHandleFlightChanged_rejectsAMessageThatIsNotJSON(t *testing.T) {
-	handler := NewEventHandler(&fakeInventoryStore{t: t})
+	handler := NewEventHandler(unusedStore{t})
 
 	err := handler.HandleFlightChanged(t.Context(), messaging.Delivery{ID: "m1", Body: []byte("not json")})
 
@@ -105,7 +135,7 @@ func TestEventHandlerHandleFlightChanged_rejectsAnEventWithoutAValidFlightID(t *
 		"malformed uuid":    `{"data": {"flight_id": "not-a-uuid", "version": 1}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			handler := NewEventHandler(&fakeInventoryStore{t: t})
+			handler := NewEventHandler(unusedStore{t})
 
 			err := handler.HandleFlightChanged(t.Context(), messaging.Delivery{ID: "m1", Body: []byte(body)})
 
@@ -115,9 +145,10 @@ func TestEventHandlerHandleFlightChanged_rejectsAnEventWithoutAValidFlightID(t *
 }
 
 func TestEventHandlerHandleFlightChanged_treatsStoreFailuresAsTemporary(t *testing.T) {
-	handler := NewEventHandler(&fakeInventoryStore{t: t, upsert: func(context.Context, store.UpsertFlightInventoryParams) error {
-		return errors.New("database unavailable")
-	}})
+	q := &recordingQueries{unusedStore: unusedStore{t}, upsert: func(store.UpsertFlightInventoryParams) (store.FlightInventory, error) {
+		return store.FlightInventory{}, errors.New("database unavailable")
+	}}
+	handler := NewEventHandler(recordingStore{unusedStore: unusedStore{t}, q: q})
 
 	err := handler.HandleFlightChanged(t.Context(), flightChangedDelivery(1, 1_250_000, 180))
 
@@ -128,7 +159,7 @@ func TestEventHandlerHandleFlightChanged_treatsStoreFailuresAsTemporary(t *testi
 func TestEventHandlerHandleFlightChanged_ignoresRepeatedAndOlderVersions(t *testing.T) {
 	pool := newTestPool(t)
 	queries := store.New(pool)
-	handler := NewEventHandler(queries)
+	handler := NewEventHandler(NewPgStore(pool))
 	apply := func(version int32, price int64, capacity int32) store.FlightInventory {
 		t.Helper()
 		require.NoError(t, handler.HandleFlightChanged(t.Context(), flightChangedDelivery(version, price, capacity)))
@@ -154,12 +185,17 @@ func TestEventHandlerHandleFlightChanged_ignoresRepeatedAndOlderVersions(t *test
 	require.Equal(t, int32(3), inventory.Version)
 	require.Equal(t, int64(800_000), inventory.Price)
 	require.Equal(t, int32(150), inventory.Capacity)
+
+	require.Equal(t, int64(2), inventory.AvailabilityVersion, "only the two applied versions moved availability")
+	requireOutbox(t, pool,
+		fmt.Sprintf(`{"flight_id":%q,"availability_version":1,"available_seats":180}`, testFlightID),
+		fmt.Sprintf(`{"flight_id":%q,"availability_version":2,"available_seats":150}`, testFlightID))
 }
 
 func TestEventHandlerHandleFlightChanged_neverTouchesTheSeatCounters(t *testing.T) {
 	pool := newTestPool(t)
 	queries := store.New(pool)
-	handler := NewEventHandler(queries)
+	handler := NewEventHandler(NewPgStore(pool))
 
 	require.NoError(t, handler.HandleFlightChanged(t.Context(), flightChangedDelivery(1, 1_250_000, 180)))
 	_, err := pool.Exec(t.Context(),
@@ -173,7 +209,10 @@ func TestEventHandlerHandleFlightChanged_neverTouchesTheSeatCounters(t *testing.
 	require.Equal(t, int32(150), inventory.Capacity)
 	require.Equal(t, int32(5), inventory.HeldSeats)
 	require.Equal(t, int32(7), inventory.SoldSeats)
-	require.Equal(t, int64(3), inventory.AvailabilityVersion)
+	require.Equal(t, int64(4), inventory.AvailabilityVersion, "a capacity change moves availability on")
+	require.JSONEq(t,
+		fmt.Sprintf(`{"flight_id":%q,"availability_version":4,"available_seats":138}`, testFlightID),
+		latestEvent(t, pool, testFlightID))
 }
 
 func databaseURL(t *testing.T) string {

@@ -3,8 +3,11 @@ package booking
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/r-mcdougall/gotravel/internal/platform/messaging"
 	"github.com/r-mcdougall/gotravel/services/booking/internal/store"
@@ -35,16 +38,12 @@ type flightChangedData struct {
 	Capacity        int32     `json:"capacity"`
 }
 
-type inventoryStore interface {
-	UpsertFlightInventory(ctx context.Context, arg store.UpsertFlightInventoryParams) error
-}
-
 type EventHandler struct {
-	store inventoryStore
+	db bookingStore
 }
 
-func NewEventHandler(store inventoryStore) *EventHandler {
-	return &EventHandler{store: store}
+func NewEventHandler(db bookingStore) *EventHandler {
+	return &EventHandler{db: db}
 }
 
 // HandleFlightChanged copies the catalog's view of a flight into the inventory.
@@ -59,7 +58,7 @@ func (h *EventHandler) HandleFlightChanged(ctx context.Context, d messaging.Deli
 		return fmt.Errorf("%s message %s has flight_id %q: %w", eventFlightChanged, d.ID, data.FlightID, messaging.ErrPermanent)
 	}
 
-	err := h.store.UpsertFlightInventory(ctx, store.UpsertFlightInventoryParams{
+	params := store.UpsertFlightInventoryParams{
 		FlightID:        data.FlightID,
 		Version:         data.Version,
 		FlightNumber:    data.FlightNumber,
@@ -70,12 +69,19 @@ func (h *EventHandler) HandleFlightChanged(ctx context.Context, d messaging.Deli
 		ArrivalAt:       data.ArrivalAt.UTC(),
 		Price:           data.Price,
 		Capacity:        data.Capacity,
-	})
-	if err != nil {
-		return fmt.Errorf("upsert flight inventory %s: %w", data.FlightID, err)
 	}
 
-	return nil
+	return h.db.InTx(ctx, func(q queries) error {
+		flight, err := q.UpsertFlightInventory(ctx, params)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // an older or repeated version changes nothing
+		}
+		if err != nil {
+			return fmt.Errorf("upsert flight inventory %s: %w", data.FlightID, err)
+		}
+
+		return recordAvailabilityChanged(ctx, q, flight)
+	})
 }
 
 type availabilityChangedData struct {

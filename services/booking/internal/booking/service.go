@@ -23,6 +23,8 @@ type queries interface {
 	ListPassengers(ctx context.Context, bookingIDs []string) ([]store.Passenger, error)
 	CancelBooking(ctx context.Context, arg store.CancelBookingParams) (store.Booking, error)
 	InsertOutboxEvent(ctx context.Context, arg store.InsertOutboxEventParams) error
+	ExpireHolds(ctx context.Context, batchSize int32) ([]store.ExpireHoldsRow, error)
+	UpsertFlightInventory(ctx context.Context, arg store.UpsertFlightInventoryParams) (store.FlightInventory, error)
 }
 
 var _ queries = (*store.Queries)(nil)
@@ -46,6 +48,8 @@ func newService(db bookingStore, holdTTL time.Duration, now func() time.Time) *s
 	return &service{db: db, holdTTL: holdTTL, now: now}
 }
 
+// Hold reserves seats for every passenger and records the booking in one transaction,
+// so two holds can never share the last seat.
 func (s *service) Hold(ctx context.Context, userID string, request HoldRequest) (Response, error) {
 	request.normalize()
 	if err := request.Validate(); err != nil {
@@ -97,6 +101,21 @@ func (s *service) Hold(ctx context.Context, userID string, request HoldRequest) 
 	}
 
 	return toResponse(booking, flight, passengers), nil
+}
+
+// holdRefusal explains why HoldSeats changed no row.
+func (s *service) holdRefusal(ctx context.Context, q queries, flightID string) error {
+	flight, err := q.GetFlightInventory(ctx, flightID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrFlightNotFound
+	case err != nil:
+		return fmt.Errorf("get flight inventory: %w", err)
+	case !flight.DepartureAt.After(s.now()):
+		return ErrFlightDeparted
+	default:
+		return ErrNotEnoughSeats
+	}
 }
 
 func (s *service) GetBooking(ctx context.Context, userID, id string) (Response, error) {
@@ -205,20 +224,7 @@ func (s *service) CancelBooking(ctx context.Context, userID, id string) (Respons
 	return toResponse(booking, flight, passengers), nil
 }
 
-func (s *service) holdRefusal(ctx context.Context, q queries, flightID string) error {
-	flight, err := q.GetFlightInventory(ctx, flightID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return ErrFlightNotFound
-	case err != nil:
-		return fmt.Errorf("get flight inventory: %w", err)
-	case !flight.DepartureAt.After(s.now()):
-		return ErrFlightDeparted
-	default:
-		return ErrNotEnoughSeats
-	}
-}
-
+// cancelRefusal explains why CancelBooking changed no row.
 func cancelRefusal(ctx context.Context, q queries, userID, id string) error {
 	_, err := q.GetBooking(ctx, store.GetBookingParams{ID: id, UserID: userID})
 	switch {
