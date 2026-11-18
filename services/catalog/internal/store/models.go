@@ -21,19 +21,20 @@ type Airport struct {
 }
 
 type Flight struct {
-	ID              string
-	FlightNumber    string
-	AirlineCode     string
-	OriginCode      string
-	DestinationCode string
-	DepartureAt     time.Time
-	ArrivalAt       time.Time
-	Price           int64
-	Capacity        int32
-	AvailableSeats  int32
-	Version         int32
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                  string
+	FlightNumber        string
+	AirlineCode         string
+	OriginCode          string
+	DestinationCode     string
+	DepartureAt         time.Time
+	ArrivalAt           time.Time
+	Price               int64
+	Capacity            int32
+	AvailableSeats      int32
+	Version             int32
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	AvailabilityVersion int64
 }
 
 type Outbox struct {

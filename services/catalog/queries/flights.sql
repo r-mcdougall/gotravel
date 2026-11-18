@@ -52,3 +52,11 @@ WHERE (sqlc.narg('origin_code')::TEXT IS NULL OR origin_code = sqlc.narg('origin
   AND (sqlc.narg('departure_date')::DATE IS NULL OR
        (departure_at AT TIME ZONE (SELECT a.timezone FROM airports a WHERE a.code = flights.origin_code))::DATE
            = sqlc.narg('departure_date'));
+
+-- name: ApplyAvailability :one
+UPDATE flights
+SET available_seats      = @available_seats,
+    availability_version = @availability_version
+WHERE id = @id
+  AND availability_version < @availability_version
+RETURNING *;

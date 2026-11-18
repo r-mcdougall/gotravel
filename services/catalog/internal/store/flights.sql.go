@@ -10,6 +10,43 @@ import (
 	"time"
 )
 
+const applyAvailability = `-- name: ApplyAvailability :one
+UPDATE flights
+SET available_seats      = $1,
+    availability_version = $2
+WHERE id = $3
+  AND availability_version < $2
+RETURNING id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at, availability_version
+`
+
+type ApplyAvailabilityParams struct {
+	AvailableSeats      int32
+	AvailabilityVersion int64
+	ID                  string
+}
+
+func (q *Queries) ApplyAvailability(ctx context.Context, arg ApplyAvailabilityParams) (Flight, error) {
+	row := q.db.QueryRow(ctx, applyAvailability, arg.AvailableSeats, arg.AvailabilityVersion, arg.ID)
+	var i Flight
+	err := row.Scan(
+		&i.ID,
+		&i.FlightNumber,
+		&i.AirlineCode,
+		&i.OriginCode,
+		&i.DestinationCode,
+		&i.DepartureAt,
+		&i.ArrivalAt,
+		&i.Price,
+		&i.Capacity,
+		&i.AvailableSeats,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AvailabilityVersion,
+	)
+	return i, err
+}
+
 const countFlights = `-- name: CountFlights :one
 SELECT count(*) FROM flights
 WHERE ($1::TEXT IS NULL OR origin_code = $1)
@@ -41,7 +78,7 @@ VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8, $9
 )
-RETURNING id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at
+RETURNING id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at, availability_version
 `
 
 type CreateFlightParams struct {
@@ -83,12 +120,13 @@ func (q *Queries) CreateFlight(ctx context.Context, arg CreateFlightParams) (Fli
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AvailabilityVersion,
 	)
 	return i, err
 }
 
 const getFlight = `-- name: GetFlight :one
-SELECT id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at FROM flights WHERE id = $1
+SELECT id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at, availability_version FROM flights WHERE id = $1
 `
 
 func (q *Queries) GetFlight(ctx context.Context, id string) (Flight, error) {
@@ -108,12 +146,13 @@ func (q *Queries) GetFlight(ctx context.Context, id string) (Flight, error) {
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AvailabilityVersion,
 	)
 	return i, err
 }
 
 const getFlightForUpdate = `-- name: GetFlightForUpdate :one
-SELECT id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at FROM flights WHERE id = $1 FOR UPDATE
+SELECT id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at, availability_version FROM flights WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) GetFlightForUpdate(ctx context.Context, id string) (Flight, error) {
@@ -133,12 +172,13 @@ func (q *Queries) GetFlightForUpdate(ctx context.Context, id string) (Flight, er
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AvailabilityVersion,
 	)
 	return i, err
 }
 
 const listFlights = `-- name: ListFlights :many
-SELECT id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at FROM flights
+SELECT id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at, availability_version FROM flights
 WHERE ($1::TEXT IS NULL OR origin_code = $1)
   AND ($2::TEXT IS NULL OR destination_code = $2)
   AND ($3::DATE IS NULL OR
@@ -185,6 +225,7 @@ func (q *Queries) ListFlights(ctx context.Context, arg ListFlightsParams) ([]Fli
 			&i.Version,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.AvailabilityVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -197,7 +238,7 @@ func (q *Queries) ListFlights(ctx context.Context, arg ListFlightsParams) ([]Fli
 }
 
 const listFlightsByRouteDay = `-- name: ListFlightsByRouteDay :many
-SELECT id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at FROM flights
+SELECT id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at, availability_version FROM flights
 WHERE origin_code = $1
   AND destination_code = $2
   AND departure_at >= $3
@@ -240,6 +281,7 @@ func (q *Queries) ListFlightsByRouteDay(ctx context.Context, arg ListFlightsByRo
 			&i.Version,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.AvailabilityVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -261,7 +303,7 @@ SET departure_at = $1,
     version = version + 1,
     updated_at = now()
 WHERE id = $6
-RETURNING id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at
+RETURNING id, flight_number, airline_code, origin_code, destination_code, departure_at, arrival_at, price, capacity, available_seats, version, created_at, updated_at, availability_version
 `
 
 type UpdateFlightParams struct {
@@ -297,6 +339,7 @@ func (q *Queries) UpdateFlight(ctx context.Context, arg UpdateFlightParams) (Fli
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AvailabilityVersion,
 	)
 	return i, err
 }
