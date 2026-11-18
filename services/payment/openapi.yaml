@@ -1,0 +1,247 @@
+openapi: 3.1.0
+info:
+  title: GoTravel Payment API
+  version: 1.0.0
+  description: >
+    Mock payments for held bookings. No money moves: the client picks the
+    outcome. Every route requires an access token issued by the auth service.
+    A payment belongs to the user in the token; other users' payments are
+    reported as not found. Times are in UTC.
+
+tags:
+  - name: payments
+    description: Payments of the signed-in user.
+
+servers:
+  - url: http://localhost:8080
+    description: Local gateway
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/payments:
+    post:
+      tags: [payments]
+      summary: Pay for a booking
+      description: >
+        Charges the total price of a `HELD` booking of the signed-in user whose
+        hold has not expired. A succeeded payment confirms the booking
+        asynchronously, usually within a second. If the hold expired or was
+        cancelled before the confirmation, the payment is reversed
+        (`REVERSED`). A failed payment changes nothing and can be retried; a
+        booking can have only one succeeded payment.
+      operationId: pay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PayRequest"
+      responses:
+        "201":
+          description: The payment, `SUCCEEDED` or `FAILED`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: The signed-in user has no booking with this id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: booking not found
+        "409":
+          description: The booking is not held, its hold has expired, or it is already paid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notPayable:
+                  value:
+                    error:
+                      code: BOOKING_NOT_PAYABLE
+                      message: only a held booking that has not expired can be paid
+                alreadyPaid:
+                  value:
+                    error:
+                      code: ALREADY_PAID
+                      message: the booking is already paid
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: The booking service could not be reached. Nothing was charged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: BOOKING_UNAVAILABLE
+                  message: the booking service is unavailable, try again later
+
+  /api/v1/payments/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [payments]
+      summary: Get a payment
+      operationId: getPayment
+      responses:
+        "200":
+          description: The payment.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: >
+            The signed-in user has no payment with this id. Payments of other
+            users and malformed ids are also reported as not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: payment not found
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    ValidationError:
+      description: Malformed JSON, unknown field, or an invalid value in the body.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: request validation failed
+              details:
+                - field: outcome
+                  message: must be succeeded or failed
+    Unauthorized:
+      description: Access token is missing, invalid or expired.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: missing or invalid access token
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: INTERNAL_ERROR
+              message: internal server error
+
+  schemas:
+    PayRequest:
+      type: object
+      additionalProperties: false
+      required: [booking_id]
+      properties:
+        booking_id:
+          type: string
+          format: uuid
+        outcome:
+          type: string
+          enum: [succeeded, failed]
+          default: succeeded
+          description: The result the mock payment should have.
+
+    Payment:
+      type: object
+      required: [id, booking_id, amount, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        booking_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+          description: The booking's total price in rupiah when the payment was made.
+          example: 2500000
+        status:
+          $ref: "#/components/schemas/PaymentStatus"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PaymentStatus:
+      type: string
+      description: >
+        `SUCCEEDED` and `FAILED` are set when the payment is made. A succeeded
+        payment becomes `REVERSED` when booking could not use it because the
+        hold had expired or was cancelled.
+      enum: [SUCCEEDED, FAILED, REVERSED]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_ERROR
+                - UNAUTHORIZED
+                - NOT_FOUND
+                - BOOKING_NOT_PAYABLE
+                - ALREADY_PAID
+                - BOOKING_UNAVAILABLE
+                - INTERNAL_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              description: Present on VALIDATION_ERROR only.
+              items:
+                type: object
+                required: [field, message]
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
