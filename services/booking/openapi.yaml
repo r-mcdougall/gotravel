@@ -331,6 +331,7 @@ components:
         - seat_price
         - total_price
         - expires_at
+        - payment_id
         - created_at
         - updated_at
       properties:
@@ -362,6 +363,10 @@ components:
           type: string
           format: date-time
           description: When an unpaid hold expires.
+        payment_id:
+          type: [string, "null"]
+          format: uuid
+          description: The payment that confirmed the booking; null until it is `CONFIRMED`.
         created_at:
           type: string
           format: date-time

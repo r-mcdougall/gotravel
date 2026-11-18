@@ -32,11 +32,18 @@ const (
 	defaultHoldTTL = 15 * time.Minute
 )
 
-var flightChanged = messaging.Subscription{
-	Exchange:   "catalog.events",
-	RoutingKey: "flight.changed",
-	Queue:      "booking.flight-changed",
-}
+var (
+	flightChanged = messaging.Subscription{
+		Exchange:   "catalog.events",
+		RoutingKey: "flight.changed",
+		Queue:      "booking.flight-changed",
+	}
+	paymentSucceeded = messaging.Subscription{
+		Exchange:   "payment.events",
+		RoutingKey: "payment.succeeded",
+		Queue:      "booking.payment-succeeded",
+	}
+)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -105,6 +112,10 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	defer runInBackground(ctx, func(ctx context.Context) {
 		messaging.Consume(ctx, rabbitmqURL, flightChanged, events.HandleFlightChanged,
 			log.With(slog.String("component", "flight_changed_consumer")))
+	})()
+	defer runInBackground(ctx, func(ctx context.Context) {
+		messaging.Consume(ctx, rabbitmqURL, paymentSucceeded, events.HandlePaymentSucceeded,
+			log.With(slog.String("component", "payment_succeeded_consumer")))
 	})()
 
 	expiredHolds := prometheus.NewCounter(prometheus.CounterOpts{

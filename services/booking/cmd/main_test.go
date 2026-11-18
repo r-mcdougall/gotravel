@@ -272,30 +272,43 @@ func TestRun_appliesMigrationsOnStart(t *testing.T) {
 	require.NoError(t, stop())
 }
 
-// logSignal closes ready once a log line containing match is written.
+// logSignal closes ready once a log line containing every match is written.
 type logSignal struct {
-	match string
+	match []string
 	ready chan struct{}
 	once  sync.Once
 }
 
 func (s *logSignal) Write(p []byte) (int, error) {
-	if bytes.Contains(p, []byte(s.match)) {
-		s.once.Do(func() { close(s.ready) })
+	for _, m := range s.match {
+		if !bytes.Contains(p, []byte(m)) {
+			return len(p), nil
+		}
 	}
+	s.once.Do(func() { close(s.ready) })
 	return len(p), nil
+}
+
+// startServiceWithConsumer starts the service and waits until the consumer logging as component
+// has declared its queue, since messages published before that are dropped.
+func startServiceWithConsumer(t *testing.T, component string) (addr string, stop func() error) {
+	t.Helper()
+	started := &logSignal{
+		match: []string{"rabbitmq consumer started", `"component":"` + component + `"`},
+		ready: make(chan struct{}),
+	}
+	addr, stop = startServiceWithLogs(t, started)
+	select {
+	case <-started.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s did not start", component)
+	}
+	return addr, stop
 }
 
 func TestRun_appliesFlightChangedEventsToTheInventory(t *testing.T) {
 	truncateBookingTables(t)
-	// Messages published before the queue exists are dropped, so wait until the consumer has declared it.
-	started := &logSignal{match: "rabbitmq consumer started", ready: make(chan struct{})}
-	_, stop := startServiceWithLogs(t, started)
-	select {
-	case <-started.ready:
-	case <-time.After(10 * time.Second):
-		t.Fatal("flight.changed consumer did not start")
-	}
+	_, stop := startServiceWithConsumer(t, "flight_changed_consumer")
 
 	const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
 	publisher := messaging.NewPublisher(rabbitmqURL, "catalog.events")
@@ -593,7 +606,7 @@ func TestRun_publishesSeatAvailabilityToRabbitMQ(t *testing.T) {
 	resetFlight(t, flightID, 3)
 
 	// Messages published before the queue exists are dropped, so wait until the consumer has declared it.
-	started := &logSignal{match: "rabbitmq consumer started", ready: make(chan struct{})}
+	started := &logSignal{match: []string{"rabbitmq consumer started"}, ready: make(chan struct{})}
 	received := make(chan messaging.Delivery, 10)
 	ctx, cancel := context.WithCancel(t.Context())
 	consumerDone := make(chan struct{})
@@ -642,6 +655,46 @@ func TestRun_publishesSeatAvailabilityToRabbitMQ(t *testing.T) {
 	require.Equal(t, flightID, event.Data.FlightID)
 	require.Equal(t, int64(1), event.Data.AvailabilityVersion)
 	require.Equal(t, int32(2), event.Data.AvailableSeats, "three seats, one held")
+
+	require.NoError(t, stop())
+}
+
+func TestRun_confirmsABookingWhenItsPaymentSucceeds(t *testing.T) {
+	const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
+	resetFlight(t, flightID, 3)
+	addr, stop := startServiceWithConsumer(t, "payment_succeeded_consumer")
+	john := signToken(t, johnID)
+
+	code, body := send(t, http.MethodPost, "http://"+addr+"/api/v1/bookings", john, fmt.Sprintf(
+		`{"flight_id": %q, "passengers": [{"full_name": "John Doe", "birth_date": "1990-05-17"}]}`, flightID))
+	require.Equal(t, http.StatusCreated, code, body)
+	var held struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &held))
+
+	const paymentID = "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a"
+	publisher := messaging.NewPublisher(rabbitmqURL, "payment.events")
+	t.Cleanup(func() { _ = publisher.Close() })
+	require.NoError(t, publisher.Publish(t.Context(), []messaging.Message{{
+		ID: "4b3a2f1e-0d9c-4b8a-a7f6-e5d4c3b2a190", Type: "payment.succeeded", Timestamp: time.Now(),
+		Body: []byte(fmt.Sprintf(`{
+			"event_id": "4b3a2f1e-0d9c-4b8a-a7f6-e5d4c3b2a190",
+			"type": "payment.succeeded",
+			"occurred_at": "2026-11-19T10:00:00Z",
+			"data": {"payment_id": %q, "booking_id": %q, "amount": 1250000}
+		}`, paymentID, held.ID)),
+	}}))
+
+	require.Eventually(t, func() bool {
+		return bookingStatus(t.Context(), addr, john, held.ID) == "CONFIRMED"
+	}, 10*time.Second, 50*time.Millisecond, "the event confirms the booking")
+
+	code, body = send(t, http.MethodGet, "http://"+addr+"/api/v1/bookings/"+held.ID, john, "")
+	require.Equal(t, http.StatusOK, code, body)
+	require.Contains(t, body, `"payment_id":"`+paymentID+`"`)
+	require.Equal(t, 1, queryCount(t, `SELECT sold_seats FROM flight_inventories`))
+	require.Zero(t, queryCount(t, `SELECT held_seats FROM flight_inventories`))
 
 	require.NoError(t, stop())
 }

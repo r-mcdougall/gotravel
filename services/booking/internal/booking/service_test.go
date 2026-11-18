@@ -95,6 +95,21 @@ func (s unusedStore) UpsertFlightInventory(context.Context, store.UpsertFlightIn
 	return store.FlightInventory{}, nil
 }
 
+func (s unusedStore) ConfirmBooking(context.Context, store.ConfirmBookingParams) (store.Booking, error) {
+	s.fail("ConfirmBooking")
+	return store.Booking{}, nil
+}
+
+func (s unusedStore) GetBookingPayment(context.Context, string) (store.GetBookingPaymentRow, error) {
+	s.fail("GetBookingPayment")
+	return store.GetBookingPaymentRow{}, nil
+}
+
+func (s unusedStore) SellHeldSeats(context.Context, store.SellHeldSeatsParams) error {
+	s.fail("SellHeldSeats")
+	return nil
+}
+
 func (s unusedStore) InTx(context.Context, func(queries) error) error {
 	s.fail("InTx")
 	return nil

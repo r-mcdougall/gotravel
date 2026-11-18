@@ -14,7 +14,7 @@ const cancelBooking = `-- name: CancelBooking :one
 UPDATE bookings
 SET status = 'CANCELLED', updated_at = now()
 WHERE id = $1 AND user_id = $2 AND status = 'HELD'
-RETURNING id, user_id, flight_id, status, passenger_count, seat_price, expires_at, created_at, updated_at
+RETURNING id, user_id, flight_id, status, passenger_count, seat_price, expires_at, created_at, updated_at, payment_id
 `
 
 type CancelBookingParams struct {
@@ -35,6 +35,37 @@ func (q *Queries) CancelBooking(ctx context.Context, arg CancelBookingParams) (B
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PaymentID,
+	)
+	return i, err
+}
+
+const confirmBooking = `-- name: ConfirmBooking :one
+UPDATE bookings
+SET status = 'CONFIRMED', payment_id = $1::uuid, updated_at = now()
+WHERE id = $2 AND status = 'HELD'
+RETURNING id, user_id, flight_id, status, passenger_count, seat_price, expires_at, created_at, updated_at, payment_id
+`
+
+type ConfirmBookingParams struct {
+	PaymentID string
+	ID        string
+}
+
+func (q *Queries) ConfirmBooking(ctx context.Context, arg ConfirmBookingParams) (Booking, error) {
+	row := q.db.QueryRow(ctx, confirmBooking, arg.PaymentID, arg.ID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.FlightID,
+		&i.Status,
+		&i.PassengerCount,
+		&i.SeatPrice,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PaymentID,
 	)
 	return i, err
 }
@@ -53,7 +84,7 @@ func (q *Queries) CountBookings(ctx context.Context, userID string) (int64, erro
 const createBooking = `-- name: CreateBooking :one
 INSERT INTO bookings (user_id, flight_id, status, passenger_count, seat_price, expires_at)
 VALUES ($1, $2, 'HELD', $3, $4, $5)
-RETURNING id, user_id, flight_id, status, passenger_count, seat_price, expires_at, created_at, updated_at
+RETURNING id, user_id, flight_id, status, passenger_count, seat_price, expires_at, created_at, updated_at, payment_id
 `
 
 type CreateBookingParams struct {
@@ -83,6 +114,7 @@ func (q *Queries) CreateBooking(ctx context.Context, arg CreateBookingParams) (B
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PaymentID,
 	)
 	return i, err
 }
@@ -134,7 +166,7 @@ func (q *Queries) ExpireHolds(ctx context.Context, batchSize int32) ([]ExpireHol
 }
 
 const getBooking = `-- name: GetBooking :one
-SELECT bookings.id, bookings.user_id, bookings.flight_id, bookings.status, bookings.passenger_count, bookings.seat_price, bookings.expires_at, bookings.created_at, bookings.updated_at, flight_inventories.flight_id, flight_inventories.version, flight_inventories.flight_number, flight_inventories.airline_code, flight_inventories.origin_code, flight_inventories.destination_code, flight_inventories.departure_at, flight_inventories.arrival_at, flight_inventories.price, flight_inventories.capacity, flight_inventories.held_seats, flight_inventories.sold_seats, flight_inventories.availability_version, flight_inventories.updated_at
+SELECT bookings.id, bookings.user_id, bookings.flight_id, bookings.status, bookings.passenger_count, bookings.seat_price, bookings.expires_at, bookings.created_at, bookings.updated_at, bookings.payment_id, flight_inventories.flight_id, flight_inventories.version, flight_inventories.flight_number, flight_inventories.airline_code, flight_inventories.origin_code, flight_inventories.destination_code, flight_inventories.departure_at, flight_inventories.arrival_at, flight_inventories.price, flight_inventories.capacity, flight_inventories.held_seats, flight_inventories.sold_seats, flight_inventories.availability_version, flight_inventories.updated_at
 FROM bookings
          JOIN flight_inventories ON flight_inventories.flight_id = bookings.flight_id
 WHERE bookings.id = $1 AND bookings.user_id = $2
@@ -163,6 +195,7 @@ func (q *Queries) GetBooking(ctx context.Context, arg GetBookingParams) (GetBook
 		&i.Booking.ExpiresAt,
 		&i.Booking.CreatedAt,
 		&i.Booking.UpdatedAt,
+		&i.Booking.PaymentID,
 		&i.FlightInventory.FlightID,
 		&i.FlightInventory.Version,
 		&i.FlightInventory.FlightNumber,
@@ -178,6 +211,22 @@ func (q *Queries) GetBooking(ctx context.Context, arg GetBookingParams) (GetBook
 		&i.FlightInventory.AvailabilityVersion,
 		&i.FlightInventory.UpdatedAt,
 	)
+	return i, err
+}
+
+const getBookingPayment = `-- name: GetBookingPayment :one
+SELECT status, payment_id FROM bookings WHERE id = $1
+`
+
+type GetBookingPaymentRow struct {
+	Status    string
+	PaymentID *string
+}
+
+func (q *Queries) GetBookingPayment(ctx context.Context, id string) (GetBookingPaymentRow, error) {
+	row := q.db.QueryRow(ctx, getBookingPayment, id)
+	var i GetBookingPaymentRow
+	err := row.Scan(&i.Status, &i.PaymentID)
 	return i, err
 }
 
@@ -220,7 +269,7 @@ func (q *Queries) HoldSeats(ctx context.Context, arg HoldSeatsParams) (FlightInv
 }
 
 const listBookings = `-- name: ListBookings :many
-SELECT bookings.id, bookings.user_id, bookings.flight_id, bookings.status, bookings.passenger_count, bookings.seat_price, bookings.expires_at, bookings.created_at, bookings.updated_at, flight_inventories.flight_id, flight_inventories.version, flight_inventories.flight_number, flight_inventories.airline_code, flight_inventories.origin_code, flight_inventories.destination_code, flight_inventories.departure_at, flight_inventories.arrival_at, flight_inventories.price, flight_inventories.capacity, flight_inventories.held_seats, flight_inventories.sold_seats, flight_inventories.availability_version, flight_inventories.updated_at
+SELECT bookings.id, bookings.user_id, bookings.flight_id, bookings.status, bookings.passenger_count, bookings.seat_price, bookings.expires_at, bookings.created_at, bookings.updated_at, bookings.payment_id, flight_inventories.flight_id, flight_inventories.version, flight_inventories.flight_number, flight_inventories.airline_code, flight_inventories.origin_code, flight_inventories.destination_code, flight_inventories.departure_at, flight_inventories.arrival_at, flight_inventories.price, flight_inventories.capacity, flight_inventories.held_seats, flight_inventories.sold_seats, flight_inventories.availability_version, flight_inventories.updated_at
 FROM bookings
          JOIN flight_inventories ON flight_inventories.flight_id = bookings.flight_id
 WHERE bookings.user_id = $1
@@ -258,6 +307,7 @@ func (q *Queries) ListBookings(ctx context.Context, arg ListBookingsParams) ([]L
 			&i.Booking.ExpiresAt,
 			&i.Booking.CreatedAt,
 			&i.Booking.UpdatedAt,
+			&i.Booking.PaymentID,
 			&i.FlightInventory.FlightID,
 			&i.FlightInventory.Version,
 			&i.FlightInventory.FlightNumber,
@@ -349,4 +399,22 @@ func (q *Queries) ReleaseHeldSeats(ctx context.Context, arg ReleaseHeldSeatsPara
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const sellHeldSeats = `-- name: SellHeldSeats :exec
+UPDATE flight_inventories
+SET held_seats = held_seats - $1,
+    sold_seats = sold_seats + $1,
+    updated_at = now()
+WHERE flight_id = $2
+`
+
+type SellHeldSeatsParams struct {
+	Seats    int32
+	FlightID string
+}
+
+func (q *Queries) SellHeldSeats(ctx context.Context, arg SellHeldSeatsParams) error {
+	_, err := q.db.Exec(ctx, sellHeldSeats, arg.Seats, arg.FlightID)
+	return err
 }
