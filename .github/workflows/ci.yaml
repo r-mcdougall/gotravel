@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [auth, catalog, booking]
+        service: [auth, catalog, booking, payment]
     steps:
       - uses: actions/checkout@v7
       - run: docker build --build-arg SERVICE=${{ matrix.service }} -t gotravel-${{ matrix.service }}:ci .
