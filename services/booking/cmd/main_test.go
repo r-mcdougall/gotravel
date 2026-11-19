@@ -351,9 +351,14 @@ const (
 
 func signToken(t *testing.T, subject string) string {
 	t.Helper()
+	return signTokenWithRole(t, subject, authn.RoleUser)
+}
+
+func signTokenWithRole(t *testing.T, subject, role string) string {
+	t.Helper()
 
 	claims := authn.AccessClaims{
-		Role: authn.RoleUser,
+		Role: role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    authn.IssuerName,
 			Subject:   subject,
@@ -695,6 +700,43 @@ func TestRun_confirmsABookingWhenItsPaymentSucceeds(t *testing.T) {
 	require.Contains(t, body, `"payment_id":"`+paymentID+`"`)
 	require.Equal(t, 1, queryCount(t, `SELECT sold_seats FROM flight_inventories`))
 	require.Zero(t, queryCount(t, `SELECT held_seats FROM flight_inventories`))
+
+	require.NoError(t, stop())
+}
+
+func TestRun_servesBookingAnalyticsToAdminsOnly(t *testing.T) {
+	const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
+	resetFlight(t, flightID, 3)
+	addr, stop := startService(t)
+	john := signToken(t, johnID)
+	analytics := "http://" + addr + "/api/v1/admin/analytics/bookings"
+
+	code, body := send(t, http.MethodPost, "http://"+addr+"/api/v1/bookings", john, fmt.Sprintf(
+		`{"flight_id": %q, "passengers": [{"full_name": "John Doe", "birth_date": "1990-05-17"}]}`, flightID))
+	require.Equal(t, http.StatusCreated, code, body)
+
+	code, body = send(t, http.MethodGet, analytics, "", "")
+	require.Equal(t, http.StatusUnauthorized, code, body)
+
+	code, body = send(t, http.MethodGet, analytics, john, "")
+	require.Equal(t, http.StatusForbidden, code, body)
+	require.Equal(t, "FORBIDDEN", errorCode(t, body))
+
+	admin := signTokenWithRole(t, "33333333-3333-4333-8333-333333333333", authn.RoleAdmin)
+	code, body = send(t, http.MethodGet, analytics+"?from=2026-11-19&to=2026-11-01", admin, "")
+	require.Equal(t, http.StatusBadRequest, code, body)
+	require.Equal(t, "VALIDATION_ERROR", errorCode(t, body))
+
+	code, body = send(t, http.MethodGet, analytics, admin, "")
+	require.Equal(t, http.StatusOK, code, body)
+	today := time.Now().UTC()
+	require.JSONEq(t, fmt.Sprintf(`{
+		"from": %q,
+		"to": %q,
+		"bookings_by_status": {"HELD": 1, "CONFIRMED": 0, "EXPIRED": 0, "CANCELLED": 0},
+		"revenue": 0,
+		"top_routes": []
+	}`, today.AddDate(0, 0, -29).Format(time.DateOnly), today.Format(time.DateOnly)), body)
 
 	require.NoError(t, stop())
 }

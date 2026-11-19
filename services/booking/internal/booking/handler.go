@@ -9,9 +9,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
-
 	"github.com/r-mcdougall/gotravel/internal/platform/authn"
+	"github.com/r-mcdougall/gotravel/internal/platform/httpserver"
 )
 
 type Service interface {
@@ -19,6 +18,7 @@ type Service interface {
 	GetBooking(ctx context.Context, userID, id string) (Response, error)
 	ListBookings(ctx context.Context, userID string, request ListRequest) (ListResponse, error)
 	CancelBooking(ctx context.Context, userID, id string) (Response, error)
+	Analytics(ctx context.Context, request AnalyticsRequest) (Analytics, error)
 }
 
 type Handler struct {
@@ -43,6 +43,8 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/api/v1/bookings", h.ListBookings)
 		r.Get("/api/v1/bookings/{id}", h.GetBooking)
 		r.Post("/api/v1/bookings/{id}/cancel", h.CancelBooking)
+
+		r.With(authn.RequireRole(authn.RoleAdmin)).Get("/api/v1/admin/analytics/bookings", h.Analytics)
 	})
 }
 
@@ -70,6 +72,19 @@ func (h *Handler) ListBookings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response, err := h.service.ListBookings(r.Context(), userID(r), request)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) Analytics(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	request := AnalyticsRequest{From: query.Get("from"), To: query.Get("to")}
+
+	response, err := h.service.Analytics(r.Context(), request)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -119,15 +134,6 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 	}
 }
 
-func invalidBody(w http.ResponseWriter) {
-	httpserver.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid request body")
-}
-
-func userID(r *http.Request) string {
-	identity, _ := authn.IdentityFrom(r.Context())
-	return identity.UserID
-}
-
 func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, err error) {
 	h.log.ErrorContext(r.Context(), "request failed",
 		slog.String("request_id", httpserver.RequestIDFrom(r.Context())),
@@ -136,6 +142,15 @@ func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, err erro
 		slog.Any("error", err),
 	)
 	httpserver.WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
+}
+
+func userID(r *http.Request) string {
+	identity, _ := authn.IdentityFrom(r.Context())
+	return identity.UserID
+}
+
+func invalidBody(w http.ResponseWriter) {
+	httpserver.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid request body")
 }
 
 func int32Param(raw string, fallback, upper int32) int32 {

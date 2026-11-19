@@ -9,6 +9,10 @@ const (
 	maxPage         = 10_000
 	defaultPageSize = 20
 	maxPageSize     = 100
+
+	defaultAnalyticsDays = 30
+	maxAnalyticsDays     = 366
+	maxTopRoutes         = 10
 )
 
 type HoldRequest struct {
@@ -64,4 +68,32 @@ type PageMeta struct {
 	Page     int32 `json:"page"`
 	PageSize int32 `json:"page_size"`
 	Total    int64 `json:"total"`
+}
+
+type AnalyticsRequest struct {
+	From string
+	To   string
+}
+
+type Analytics struct {
+	From             string         `json:"from"`
+	To               string         `json:"to"`
+	BookingsByStatus StatusCounts   `json:"bookings_by_status"`
+	Revenue          int64          `json:"revenue"`
+	TopRoutes        []RouteSummary `json:"top_routes"`
+}
+
+type StatusCounts struct {
+	Held      int64 `json:"HELD"`
+	Confirmed int64 `json:"CONFIRMED"`
+	Expired   int64 `json:"EXPIRED"`
+	Cancelled int64 `json:"CANCELLED"`
+}
+
+type RouteSummary struct {
+	OriginCode      string `json:"origin_code"`
+	DestinationCode string `json:"destination_code"`
+	Bookings        int64  `json:"bookings"`
+	Seats           int64  `json:"seats"`
+	Revenue         int64  `json:"revenue"`
 }
