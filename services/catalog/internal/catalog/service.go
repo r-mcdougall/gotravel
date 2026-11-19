@@ -35,22 +35,28 @@ type flightStore interface {
 	InTx(ctx context.Context, fn func(queries) error) error
 }
 
+type seatReader interface {
+	FlightSeats(ctx context.Context, authorization, flightID string) (BookedSeats, bool, error)
+}
+
 type service struct {
 	db        flightStore
 	reference *Reference
 	cache     *RouteDayCache
+	seats     seatReader
 	now       func() time.Time
 }
 
-func NewService(db flightStore, reference *Reference, cache *RouteDayCache) Service {
-	return newService(db, reference, cache, time.Now)
+func NewService(db flightStore, reference *Reference, cache *RouteDayCache, seats seatReader) Service {
+	return newService(db, reference, cache, seats, time.Now)
 }
 
-func newService(db flightStore, reference *Reference, cache *RouteDayCache, now func() time.Time) *service {
+func newService(db flightStore, reference *Reference, cache *RouteDayCache, seats seatReader, now func() time.Time) *service {
 	return &service{
 		db:        db,
 		reference: reference,
 		cache:     cache,
+		seats:     seats,
 		now:       now,
 	}
 }
@@ -97,12 +103,17 @@ func (s *service) CreateFlight(ctx context.Context, request CreateFlightRequest)
 	return s.toAdminFlightResponse(created)
 }
 
-func (s *service) UpdateFlight(ctx context.Context, id string, request UpdateFlightRequest) (AdminFlightResponse, error) {
+func (s *service) UpdateFlight(ctx context.Context, id, authorization string, request UpdateFlightRequest) (AdminFlightResponse, error) {
 	if err := request.Validate(); err != nil {
 		return AdminFlightResponse{}, fmt.Errorf("validate request: %w", err)
 	}
 	if !validUUID(id) {
 		return AdminFlightResponse{}, ErrFlightNotFound
+	}
+	if request.Capacity != nil {
+		if err := s.checkCapacity(ctx, id, authorization, *request.Capacity); err != nil {
+			return AdminFlightResponse{}, err
+		}
 	}
 
 	var before, updated store.Flight
@@ -112,12 +123,7 @@ func (s *service) UpdateFlight(ctx context.Context, id string, request UpdateFli
 			return flightQueryError("get flight for update", err)
 		}
 
-		params, err := applyUpdate(current, request)
-		if err != nil {
-			return err
-		}
-
-		flight, err := q.UpdateFlight(ctx, params)
+		flight, err := q.UpdateFlight(ctx, applyUpdate(current, request))
 		if err != nil {
 			return flightWriteError("update flight", err)
 		}
@@ -295,8 +301,26 @@ func (s *service) checkReferences(request CreateFlightRequest) error {
 	return v.err()
 }
 
-// applyUpdate merges the request into the locked row. Capacity moves available seats by the same amount, and may not push them below zero.
-func applyUpdate(current store.Flight, request UpdateFlightRequest) (store.UpdateFlightParams, error) {
+func (s *service) checkCapacity(ctx context.Context, id, authorization string, capacity int32) error {
+	current, err := s.db.GetFlight(ctx, id)
+	if err != nil {
+		return flightQueryError("get flight", err)
+	}
+	if capacity >= current.Capacity {
+		return nil
+	}
+
+	seats, found, err := s.seats.FlightSeats(ctx, authorization, id)
+	if err != nil {
+		return fmt.Errorf("get booked seats: %w", err)
+	}
+	if found && capacity < seats.HeldSeats+seats.SoldSeats {
+		return ErrCapacityBelowSold
+	}
+	return nil
+}
+
+func applyUpdate(current store.Flight, request UpdateFlightRequest) store.UpdateFlightParams {
 	params := store.UpdateFlightParams{
 		ID:             current.ID,
 		DepartureAt:    current.DepartureAt,
@@ -315,13 +339,10 @@ func applyUpdate(current store.Flight, request UpdateFlightRequest) (store.Updat
 	}
 	if request.Capacity != nil {
 		params.Capacity = *request.Capacity
-		params.AvailableSeats = current.AvailableSeats + (*request.Capacity - current.Capacity)
-		if params.AvailableSeats < 0 {
-			return store.UpdateFlightParams{}, ErrCapacityBelowSold
-		}
+		params.AvailableSeats = max(0, current.AvailableSeats+(*request.Capacity-current.Capacity))
 	}
 
-	return params, nil
+	return params
 }
 
 func recordFlightChanged(ctx context.Context, q queries, flight store.Flight) error {

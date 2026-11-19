@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	ErrFlightNotFound    = errors.New("flight not found")
-	ErrFlightExists      = errors.New("flight already exists for this departure time")
-	ErrCapacityBelowSold = errors.New("capacity is lower than the number of seats already sold")
+	ErrFlightNotFound     = errors.New("flight not found")
+	ErrFlightExists       = errors.New("flight already exists for this departure time")
+	ErrCapacityBelowSold  = errors.New("capacity is lower than the seats already held or sold")
+	ErrBookingUnavailable = errors.New("booking service unavailable")
 )
 
 type ValidationError struct {

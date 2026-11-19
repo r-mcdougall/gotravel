@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -96,6 +97,32 @@ func (f *fakeStore) InTx(_ context.Context, fn func(queries) error) error {
 	return fn(f)
 }
 
+const adminAuthorization = "Bearer admin-token"
+
+// fakeSeats answers for booking; a nil flightSeats fails the test, so booking must not be asked.
+type fakeSeats struct {
+	t           *testing.T
+	flightSeats func(authorization, flightID string) (BookedSeats, bool, error)
+}
+
+func (f *fakeSeats) FlightSeats(_ context.Context, authorization, flightID string) (BookedSeats, bool, error) {
+	f.t.Helper()
+	if f.flightSeats == nil {
+		f.t.Fatal("unexpected call to FlightSeats")
+	}
+	return f.flightSeats(authorization, flightID)
+}
+
+// bookingHolds is a booking that reports held and sold seats for sampleFlight, and checks the admin's token.
+func bookingHolds(held, sold int32) *fakeSeats {
+	return &fakeSeats{flightSeats: func(authorization, flightID string) (BookedSeats, bool, error) {
+		if authorization != adminAuthorization || flightID != sampleFlightID {
+			return BookedSeats{}, false, fmt.Errorf("unexpected booking call with %q for %s", authorization, flightID)
+		}
+		return BookedSeats{HeldSeats: held, SoldSeats: sold}, true, nil
+	}}
+}
+
 func newTestService(t *testing.T, db *fakeStore) Service {
 	t.Helper()
 	return newTestServiceAt(t, db, time.Now())
@@ -110,12 +137,19 @@ func newTestServiceAt(t *testing.T, db *fakeStore, now time.Time) Service {
 // newTestServiceWithCache is newTestServiceAt with a route-day cache; nil disables it.
 func newTestServiceWithCache(t *testing.T, db *fakeStore, routeCache *RouteDayCache, now time.Time) Service {
 	t.Helper()
+	return newTestServiceWithSeats(t, db, routeCache, &fakeSeats{}, now)
+}
+
+// newTestServiceWithSeats is newTestServiceWithCache with a booking that reports seats.
+func newTestServiceWithSeats(t *testing.T, db *fakeStore, routeCache *RouteDayCache, seats *fakeSeats, now time.Time) Service {
+	t.Helper()
 	db.t = t
+	seats.t = t
 
 	reference, err := LoadReference(t.Context(), sampleReferenceQueries(t))
 	require.NoError(t, err)
 
-	return newService(db, reference, routeCache, func() time.Time { return now })
+	return newService(db, reference, routeCache, seats, func() time.Time { return now })
 }
 
 // sampleFlight is GA410 from Jakarta to Denpasar: 06:00 WIB, 08:55 WITA.
@@ -279,6 +313,7 @@ func TestServiceCreateFlight_failsWhenTheOutboxInsertFails(t *testing.T) {
 // that applies updates the way PostgreSQL would, and records what it was asked to write.
 func updateDB(updated *store.UpdateFlightParams, event *store.InsertOutboxEventParams) *fakeStore {
 	return &fakeStore{
+		getFlight:          func(context.Context, string) (store.Flight, error) { return sampleFlight(), nil },
 		getFlightForUpdate: func(context.Context, string) (store.Flight, error) { return sampleFlight(), nil },
 		updateFlight: func(_ context.Context, arg store.UpdateFlightParams) (store.Flight, error) {
 			*updated = arg
@@ -306,7 +341,7 @@ func TestServiceUpdateFlight_changesThePriceAndKeepsEverythingElse(t *testing.T)
 	svc := newTestService(t, updateDB(&updated, &event))
 	current := sampleFlight()
 
-	response, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{Price: ptr(int64(900_000))})
+	response, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Price: ptr(int64(900_000))})
 	require.NoError(t, err)
 
 	require.Equal(t, sampleFlightID, updated.ID)
@@ -325,7 +360,7 @@ func TestServiceUpdateFlight_recordsAnEventWithTheNewVersion(t *testing.T) {
 	)
 	svc := newTestService(t, updateDB(&updated, &event))
 
-	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{Price: ptr(int64(900_000))})
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Price: ptr(int64(900_000))})
 	require.NoError(t, err)
 
 	data := outboxPayload(t, event)
@@ -342,7 +377,7 @@ func TestServiceUpdateFlight_replacesTheSchedule(t *testing.T) {
 	departure := time.Date(2026, 11, 21, 7, 0, 0, 0, wib)
 	arrival := time.Date(2026, 11, 21, 9, 55, 0, 0, wita)
 
-	response, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{DepartureAt: &departure, ArrivalAt: &arrival})
+	response, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{DepartureAt: &departure, ArrivalAt: &arrival})
 	require.NoError(t, err)
 
 	require.True(t, departure.Equal(updated.DepartureAt))
@@ -354,11 +389,13 @@ func TestServiceUpdateFlight_movesAvailableSeatsWithCapacity(t *testing.T) {
 	tests := []struct {
 		name      string
 		capacity  int32
+		booking   *fakeSeats
 		available int32
 	}{
-		{"capacity grows", 200, 62},
-		{"capacity shrinks but stays above the sold seats", 150, 12},
-		{"capacity drops to exactly the sold seats", 138, 0},
+		{"capacity grows without asking booking", 200, &fakeSeats{}, 62},
+		{"capacity shrinks", 150, bookingHolds(10, 128), 12},
+		{"capacity drops to exactly the seats booking holds and sold", 138, bookingHolds(10, 128), 0},
+		{"the local count goes no lower than zero", 100, bookingHolds(10, 80), 0},
 	}
 
 	for _, tc := range tests {
@@ -367,9 +404,9 @@ func TestServiceUpdateFlight_movesAvailableSeatsWithCapacity(t *testing.T) {
 				updated store.UpdateFlightParams
 				event   store.InsertOutboxEventParams
 			)
-			svc := newTestService(t, updateDB(&updated, &event))
+			svc := newTestServiceWithSeats(t, updateDB(&updated, &event), nil, tc.booking, time.Now())
 
-			response, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{Capacity: ptr(tc.capacity)})
+			response, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Capacity: ptr(tc.capacity)})
 			require.NoError(t, err)
 
 			require.Equal(t, tc.capacity, updated.Capacity)
@@ -379,15 +416,55 @@ func TestServiceUpdateFlight_movesAvailableSeatsWithCapacity(t *testing.T) {
 	}
 }
 
-func TestServiceUpdateFlight_rejectsCapacityBelowTheSoldSeats(t *testing.T) {
+func TestServiceUpdateFlight_rejectsCapacityBelowTheSeatsBookingHoldsAndSold(t *testing.T) {
 	db := &fakeStore{
-		getFlightForUpdate: func(context.Context, string) (store.Flight, error) { return sampleFlight(), nil },
+		getFlight: func(context.Context, string) (store.Flight, error) { return sampleFlight(), nil },
+		// No transaction: the update is refused before the row is locked.
 	}
-	svc := newTestService(t, db)
+	svc := newTestServiceWithSeats(t, db, nil, bookingHolds(5, 140), time.Now())
 
-	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{Capacity: ptr(int32(137))})
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Capacity: ptr(int32(144))})
 
 	require.ErrorIs(t, err, ErrCapacityBelowSold)
+}
+
+func TestServiceUpdateFlight_lowersTheCapacityOfAFlightBookingDoesNotKnowYet(t *testing.T) {
+	var (
+		updated store.UpdateFlightParams
+		event   store.InsertOutboxEventParams
+	)
+	unknown := &fakeSeats{flightSeats: func(string, string) (BookedSeats, bool, error) { return BookedSeats{}, false, nil }}
+	svc := newTestServiceWithSeats(t, updateDB(&updated, &event), nil, unknown, time.Now())
+
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Capacity: ptr(int32(10))})
+
+	require.NoError(t, err)
+	require.Equal(t, int32(10), updated.Capacity)
+}
+
+func TestServiceUpdateFlight_refusesToLowerTheCapacityWhileBookingIsUnavailable(t *testing.T) {
+	db := &fakeStore{
+		getFlight: func(context.Context, string) (store.Flight, error) { return sampleFlight(), nil },
+	}
+	down := &fakeSeats{flightSeats: func(string, string) (BookedSeats, bool, error) {
+		return BookedSeats{}, false, fmt.Errorf("%w: connection refused", ErrBookingUnavailable)
+	}}
+	svc := newTestServiceWithSeats(t, db, nil, down, time.Now())
+
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Capacity: ptr(int32(100))})
+
+	require.ErrorIs(t, err, ErrBookingUnavailable)
+}
+
+func TestServiceUpdateFlight_reportsAMissingFlightBeforeAskingBooking(t *testing.T) {
+	db := &fakeStore{
+		getFlight: func(context.Context, string) (store.Flight, error) { return store.Flight{}, pgx.ErrNoRows },
+	}
+	svc := newTestServiceWithSeats(t, db, nil, &fakeSeats{}, time.Now())
+
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Capacity: ptr(int32(100))})
+
+	require.ErrorIs(t, err, ErrFlightNotFound)
 }
 
 func TestServiceUpdateFlight_reportsAMissingFlight(t *testing.T) {
@@ -396,7 +473,7 @@ func TestServiceUpdateFlight_reportsAMissingFlight(t *testing.T) {
 	}
 	svc := newTestService(t, db)
 
-	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{Price: ptr(int64(900_000))})
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Price: ptr(int64(900_000))})
 
 	require.ErrorIs(t, err, ErrFlightNotFound)
 }
@@ -404,7 +481,7 @@ func TestServiceUpdateFlight_reportsAMissingFlight(t *testing.T) {
 func TestServiceUpdateFlight_treatsAMalformedIDAsMissing(t *testing.T) {
 	svc := newTestService(t, &fakeStore{})
 
-	_, err := svc.UpdateFlight(t.Context(), "not-a-uuid", UpdateFlightRequest{Price: ptr(int64(900_000))})
+	_, err := svc.UpdateFlight(t.Context(), "not-a-uuid", adminAuthorization, UpdateFlightRequest{Price: ptr(int64(900_000))})
 
 	require.ErrorIs(t, err, ErrFlightNotFound)
 }
@@ -412,7 +489,7 @@ func TestServiceUpdateFlight_treatsAMalformedIDAsMissing(t *testing.T) {
 func TestServiceUpdateFlight_rejectsAnInvalidRequestWithoutTouchingTheStore(t *testing.T) {
 	svc := newTestService(t, &fakeStore{})
 
-	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{})
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{})
 
 	require.Equal(t, []string{"body"}, invalidFields(t, err))
 }
@@ -428,7 +505,7 @@ func TestServiceUpdateFlight_reportsAScheduleThatCollidesWithAnotherFlight(t *te
 	departure := time.Date(2026, 11, 21, 7, 0, 0, 0, wib)
 	arrival := time.Date(2026, 11, 21, 9, 55, 0, 0, wita)
 
-	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{DepartureAt: &departure, ArrivalAt: &arrival})
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{DepartureAt: &departure, ArrivalAt: &arrival})
 
 	require.ErrorIs(t, err, ErrFlightExists)
 }
@@ -988,7 +1065,7 @@ func TestServiceUpdateFlight_forgetsTheCachedRouteDay(t *testing.T) {
 	)
 	svc := newTestServiceWithCache(t, updateDB(&updated, &event), recordDeletes(t, &deleted), searchTestNow)
 
-	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{Price: ptr(int64(900_000))})
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Price: ptr(int64(900_000))})
 
 	require.NoError(t, err)
 	require.Equal(t, []string{"catalog:flights:CGK:DPS:2026-11-20"}, deleted, "one key, not the same day twice")
@@ -1004,7 +1081,7 @@ func TestServiceUpdateFlight_forgetsBothDaysWhenTheFlightMovesToAnotherDay(t *te
 	departure := time.Date(2026, 11, 21, 7, 0, 0, 0, wib)
 	arrival := time.Date(2026, 11, 21, 9, 55, 0, 0, wita)
 
-	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{DepartureAt: &departure, ArrivalAt: &arrival})
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{DepartureAt: &departure, ArrivalAt: &arrival})
 
 	require.NoError(t, err)
 	require.Equal(t, []string{"catalog:flights:CGK:DPS:2026-11-20", "catalog:flights:CGK:DPS:2026-11-21"}, deleted)
@@ -1013,11 +1090,11 @@ func TestServiceUpdateFlight_forgetsBothDaysWhenTheFlightMovesToAnotherDay(t *te
 func TestServiceUpdateFlight_keepsTheCacheWhenTheUpdateIsRejected(t *testing.T) {
 	routeCache, _ := newTestRouteDayCache(&fakeSearchCache{t: t}) // a delete would fail the test
 	db := &fakeStore{
-		getFlightForUpdate: func(context.Context, string) (store.Flight, error) { return sampleFlight(), nil },
+		getFlight: func(context.Context, string) (store.Flight, error) { return sampleFlight(), nil },
 	}
-	svc := newTestServiceWithCache(t, db, routeCache, searchTestNow)
+	svc := newTestServiceWithSeats(t, db, routeCache, bookingHolds(5, 140), searchTestNow)
 
-	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, UpdateFlightRequest{Capacity: ptr(int32(10))})
+	_, err := svc.UpdateFlight(t.Context(), sampleFlightID, adminAuthorization, UpdateFlightRequest{Capacity: ptr(int32(10))})
 
 	require.ErrorIs(t, err, ErrCapacityBelowSold)
 }

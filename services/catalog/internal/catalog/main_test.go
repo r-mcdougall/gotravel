@@ -63,6 +63,7 @@ type env struct {
 	pgStore   *PgStore
 	pool      *pgxpool.Pool
 	reference *Reference
+	seats     *fakeSeats
 }
 
 // newEnv connects to the shared database and empties the tables the tests
@@ -80,11 +81,17 @@ func newEnv(t *testing.T) *env {
 	reference, err := LoadReference(t.Context(), pgStore)
 	require.NoError(t, err)
 
+	// Booking knows none of these flights, so it never refuses a lower capacity here.
+	bookingWithoutFlights := &fakeSeats{t: t, flightSeats: func(string, string) (BookedSeats, bool, error) {
+		return BookedSeats{}, false, nil
+	}}
+
 	return &env{
-		service:   NewService(pgStore, reference, nil),
+		service:   NewService(pgStore, reference, nil, bookingWithoutFlights),
 		pgStore:   pgStore,
 		pool:      pool,
 		reference: reference,
+		seats:     bookingWithoutFlights,
 	}
 }
 

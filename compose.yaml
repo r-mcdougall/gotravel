@@ -94,6 +94,8 @@ services:
       REDIS_URL: ${CATALOG_REDIS_URL-redis://redis:6379}
       SEARCH_CACHE_TTL: ${SEARCH_CACHE_TTL:-60s}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:?set RABBITMQ_USER in .env}:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/
+      # Asked only when an admin lowers a capacity; while booking is down that answers 503.
+      BOOKING_URL: http://booking:8080
     secrets:
       - jwt_public_key
     depends_on:

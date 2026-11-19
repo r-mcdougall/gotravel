@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,8 +92,14 @@ func runTests(m *testing.M) int {
 		return 1
 	}
 
+	// By default booking knows no flight, so lowering a capacity is allowed; tests that
+	// need held or sold seats point BOOKING_URL at their own fake.
+	booking := httptest.NewServer(http.NotFoundHandler())
+	defer booking.Close()
+
 	for key, value := range map[string]string{
 		"DATABASE_URL": url, "JWT_PUBLIC_KEY_FILE": keyFile, "REDIS_URL": "", "RABBITMQ_URL": rabbitmqURL,
+		"BOOKING_URL": booking.URL,
 	} {
 		if err := os.Setenv(key, value); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -250,6 +257,26 @@ func TestRun_failsWithoutRabbitMQURL(t *testing.T) {
 	err := run(t.Context(), nil, io.Discard)
 
 	require.ErrorContains(t, err, "RABBITMQ_URL is required")
+}
+
+func TestRun_failsWithoutBookingURL(t *testing.T) {
+	t.Setenv("BOOKING_URL", "")
+
+	err := run(t.Context(), nil, io.Discard)
+
+	require.ErrorContains(t, err, "BOOKING_URL is required")
+}
+
+func TestRun_failsOnInvalidBookingURL(t *testing.T) {
+	for _, value := range []string{"booking:8080", "/internal/v1", "http://"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("BOOKING_URL", value)
+
+			err := run(t.Context(), nil, io.Discard)
+
+			require.ErrorContains(t, err, "BOOKING_URL must be an absolute URL")
+		})
+	}
 }
 
 func TestRun_failsWhenDatabaseIsUnreachable(t *testing.T) {
@@ -922,4 +949,51 @@ func searchSeats(ctx context.Context, url string) int {
 		return -1
 	}
 	return list.Data[0].AvailableSeats
+}
+
+func TestRun_refusesToLowerCapacityBelowTheSeatsBookingHolds(t *testing.T) {
+	truncateFlights(t)
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	booking := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+admin {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"capacity": 180, "held_seats": 5, "sold_seats": 140}`))
+	}))
+	t.Cleanup(booking.Close)
+	t.Setenv("BOOKING_URL", booking.URL)
+	addr, stop := startService(t)
+	departure, _ := nextWeek()
+	id := createFlightOnRoute(t, addr, admin, "GA410", departure, 1_250_000)
+	flight := "http://" + addr + "/api/v1/admin/flights/" + id
+
+	code, body := send(t, http.MethodPatch, flight, admin, `{"capacity": 144}`)
+	require.Equal(t, http.StatusConflict, code, body)
+	require.Equal(t, "CAPACITY_BELOW_SOLD", errorCode(t, body))
+
+	code, body = send(t, http.MethodPatch, flight, admin, `{"capacity": 145}`)
+	require.Equal(t, http.StatusOK, code, body)
+	require.Contains(t, body, `"capacity":145`)
+
+	require.NoError(t, stop())
+}
+
+func TestRun_refusesToLowerCapacityWhileBookingIsDown(t *testing.T) {
+	truncateFlights(t)
+	t.Setenv("BOOKING_URL", "http://127.0.0.1:1") // nothing listens there
+	addr, stop := startService(t)
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	departure, _ := nextWeek()
+	flight := "http://" + addr + "/api/v1/admin/flights/" + createFlightOnRoute(t, addr, admin, "GA410", departure, 1_250_000)
+
+	code, body := send(t, http.MethodPatch, flight, admin, `{"capacity": 100}`)
+	require.Equal(t, http.StatusServiceUnavailable, code, body)
+	require.Equal(t, "BOOKING_UNAVAILABLE", errorCode(t, body))
+
+	code, body = send(t, http.MethodPatch, flight, admin, `{"capacity": 200, "price": 900000}`)
+	require.Equal(t, http.StatusOK, code, body, "raising the capacity or changing the price does not need booking")
+
+	require.NoError(t, stop())
 }
