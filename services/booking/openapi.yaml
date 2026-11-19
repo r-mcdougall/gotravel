@@ -3,13 +3,16 @@ info:
   title: GoTravel Booking API
   version: 1.0.0
   description: >
-    Seat holds and the booking lifecycle. Every route requires an access token
-    issued by the auth service. A booking belongs to the user in the token;
-    other users' bookings are reported as not found. Times are in UTC.
+    Seat holds, the booking lifecycle and booking analytics for admins. Every
+    route requires an access token issued by the auth service. A booking
+    belongs to the user in the token; other users' bookings are reported as
+    not found. Times are in UTC.
 
 tags:
   - name: bookings
     description: Holds and bookings of the signed-in user.
+  - name: admin
+    description: Booking analytics. Requires the `admin` role.
 
 servers:
   - url: http://localhost:8080
@@ -166,6 +169,58 @@ paths:
                 error:
                   code: BOOKING_NOT_HELD
                   message: only a held booking can be cancelled
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/analytics/bookings:
+    get:
+      tags: [admin]
+      summary: Booking analytics
+      description: >
+        Summarizes the bookings created in a period of whole UTC days, from
+        00:00 of `from` to 24:00 of `to`: bookings per status, revenue from
+        confirmed bookings, and the 10 routes with the most confirmed bookings
+        (ties go to more seats, then route codes). Without dates, the period is
+        the 30 days up to today.
+      operationId: getBookingAnalytics
+      parameters:
+        - name: from
+          in: query
+          description: First day of the period. Defaults to 29 days before `to`.
+          schema:
+            type: string
+            format: date
+          example: "2026-11-01"
+        - name: to
+          in: query
+          description: >
+            Last day of the period, at most 365 days after `from`. Defaults to
+            today in UTC.
+          schema:
+            type: string
+            format: date
+          example: "2026-11-19"
+      responses:
+        "200":
+          description: The summary of the period.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Analytics"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The access token does not have the `admin` role.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: FORBIDDEN
+                  message: insufficient permissions
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -397,6 +452,76 @@ components:
         meta:
           $ref: "#/components/schemas/PageMeta"
 
+    Analytics:
+      type: object
+      required: [from, to, bookings_by_status, revenue, top_routes]
+      properties:
+        from:
+          type: string
+          format: date
+          example: "2026-10-21"
+        to:
+          type: string
+          format: date
+          example: "2026-11-19"
+        bookings_by_status:
+          type: object
+          description: Bookings created in the period, by their current status.
+          required: [HELD, CONFIRMED, EXPIRED, CANCELLED]
+          properties:
+            HELD:
+              type: integer
+              format: int64
+              example: 3
+            CONFIRMED:
+              type: integer
+              format: int64
+              example: 42
+            EXPIRED:
+              type: integer
+              format: int64
+              example: 11
+            CANCELLED:
+              type: integer
+              format: int64
+              example: 5
+        revenue:
+          type: integer
+          format: int64
+          description: Total price in rupiah of the confirmed bookings.
+          example: 63500000
+        top_routes:
+          type: array
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/RouteSummary"
+
+    RouteSummary:
+      type: object
+      required: [origin_code, destination_code, bookings, seats, revenue]
+      properties:
+        origin_code:
+          type: string
+          example: CGK
+        destination_code:
+          type: string
+          example: DPS
+        bookings:
+          type: integer
+          format: int64
+          description: Confirmed bookings.
+          example: 18
+        seats:
+          type: integer
+          format: int64
+          description: Passengers of the confirmed bookings.
+          example: 31
+        revenue:
+          type: integer
+          format: int64
+          description: Total price in rupiah of the confirmed bookings.
+          example: 27900000
+
     Error:
       type: object
       required: [error]
@@ -410,6 +535,7 @@ components:
               enum:
                 - VALIDATION_ERROR
                 - UNAUTHORIZED
+                - FORBIDDEN
                 - NOT_FOUND
                 - FLIGHT_DEPARTED
                 - NOT_ENOUGH_SEATS
