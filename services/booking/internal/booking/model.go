@@ -97,3 +97,11 @@ type RouteSummary struct {
 	Seats           int64  `json:"seats"`
 	Revenue         int64  `json:"revenue"`
 }
+
+// FlightSeats is booking's seat count of a flight, read by catalog before it lowers the capacity.
+type FlightSeats struct {
+	FlightID  string `json:"flight_id"`
+	Capacity  int32  `json:"capacity"`
+	HeldSeats int32  `json:"held_seats"`
+	SoldSeats int32  `json:"sold_seats"`
+}

@@ -380,3 +380,33 @@ func requireOutbox(t *testing.T, pool *pgxpool.Pool, wantPayloads ...string) {
 		require.JSONEq(t, want, got[i])
 	}
 }
+
+func TestServiceFlightSeats_returnsTheSeatCountersOfTheInventory(t *testing.T) {
+	svc, pool, now := newTestService(t)
+	addFlight(t, pool, testFlightID, now.Add(7*24*time.Hour), 180)
+	_, err := svc.Hold(t.Context(), johnID, HoldRequest{FlightID: testFlightID, Passengers: twoPassengers()})
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), `UPDATE flight_inventories SET sold_seats = 5`)
+	require.NoError(t, err)
+
+	seats, err := svc.FlightSeats(t.Context(), testFlightID)
+	require.NoError(t, err)
+
+	require.Equal(t, FlightSeats{FlightID: testFlightID, Capacity: 180, HeldSeats: 2, SoldSeats: 5}, seats)
+}
+
+func TestServiceFlightSeats_reportsAFlightBookingDoesNotKnow(t *testing.T) {
+	svc, _, _ := newTestService(t)
+
+	_, err := svc.FlightSeats(t.Context(), "33333333-3333-4333-8333-333333333333")
+
+	require.ErrorIs(t, err, ErrFlightNotFound)
+}
+
+func TestServiceFlightSeats_treatsAMalformedIDAsUnknownWithoutQuerying(t *testing.T) {
+	svc := newService(unusedStore{t}, 15*time.Minute, time.Now)
+
+	_, err := svc.FlightSeats(t.Context(), "not-a-uuid")
+
+	require.ErrorIs(t, err, ErrFlightNotFound)
+}
