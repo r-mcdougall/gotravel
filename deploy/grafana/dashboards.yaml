@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: gotravel
+    folder: GoTravel
+    type: file
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
