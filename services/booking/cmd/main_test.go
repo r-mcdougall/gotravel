@@ -740,3 +740,33 @@ func TestRun_servesBookingAnalyticsToAdminsOnly(t *testing.T) {
 
 	require.NoError(t, stop())
 }
+
+func TestRun_showsTheSeatsOfAFlightToAdminsOnly(t *testing.T) {
+	const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
+	resetFlight(t, flightID, 3)
+	addr, stop := startService(t)
+	john := signToken(t, johnID)
+	admin := signTokenWithRole(t, "33333333-3333-4333-8333-333333333333", authn.RoleAdmin)
+	seats := "http://" + addr + "/internal/v1/flights/"
+
+	code, body := send(t, http.MethodPost, "http://"+addr+"/api/v1/bookings", john, fmt.Sprintf(
+		`{"flight_id": %q, "passengers": [{"full_name": "John Doe", "birth_date": "1990-05-17"}]}`, flightID))
+	require.Equal(t, http.StatusCreated, code, body)
+
+	code, body = send(t, http.MethodGet, seats+flightID+"/seats", "", "")
+	require.Equal(t, http.StatusUnauthorized, code, body)
+
+	code, body = send(t, http.MethodGet, seats+flightID+"/seats", john, "")
+	require.Equal(t, http.StatusForbidden, code, body)
+	require.Equal(t, "FORBIDDEN", errorCode(t, body))
+
+	code, body = send(t, http.MethodGet, seats+flightID+"/seats", admin, "")
+	require.Equal(t, http.StatusOK, code, body)
+	require.JSONEq(t, fmt.Sprintf(`{"flight_id": %q, "capacity": 3, "held_seats": 1, "sold_seats": 0}`, flightID), body)
+
+	code, body = send(t, http.MethodGet, seats+"6a1c0e55-1c7e-4c63-9a52-0b1d6b0f2d3e/seats", admin, "")
+	require.Equal(t, http.StatusNotFound, code, body)
+	require.Equal(t, "NOT_FOUND", errorCode(t, body))
+
+	require.NoError(t, stop())
+}

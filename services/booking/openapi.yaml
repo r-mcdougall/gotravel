@@ -13,6 +13,10 @@ tags:
     description: Holds and bookings of the signed-in user.
   - name: admin
     description: Booking analytics. Requires the `admin` role.
+  - name: internal
+    description: >
+      Routes for other services. The gateway does not route `/internal`, so
+      they are reachable only inside the Docker network.
 
 servers:
   - url: http://localhost:8080
@@ -221,6 +225,54 @@ paths:
                 error:
                   code: FORBIDDEN
                   message: insufficient permissions
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /internal/v1/flights/{id}/seats:
+    get:
+      tags: [internal]
+      summary: Seats of a flight
+      description: >
+        The seat counters of a flight's inventory. The catalog service calls it
+        with the admin's own token before it lowers a capacity. Requires the
+        `admin` role.
+      operationId: getFlightSeats
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The seat counters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlightSeats"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The access token does not have the `admin` role.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: FORBIDDEN
+                  message: insufficient permissions
+        "404":
+          description: Booking has not received this flight from the catalog yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: flight not found
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -495,6 +547,28 @@ components:
           maxItems: 10
           items:
             $ref: "#/components/schemas/RouteSummary"
+
+    FlightSeats:
+      type: object
+      required: [flight_id, capacity, held_seats, sold_seats]
+      properties:
+        flight_id:
+          type: string
+          format: uuid
+        capacity:
+          type: integer
+          format: int32
+          example: 180
+        held_seats:
+          type: integer
+          format: int32
+          description: Seats of `HELD` bookings.
+          example: 5
+        sold_seats:
+          type: integer
+          format: int32
+          description: Seats of `CONFIRMED` bookings.
+          example: 140
 
     RouteSummary:
       type: object

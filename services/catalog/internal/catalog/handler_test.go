@@ -32,7 +32,7 @@ const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
 type fakeService struct {
 	t               *testing.T
 	createFlight    func(ctx context.Context, request CreateFlightRequest) (AdminFlightResponse, error)
-	updateFlight    func(ctx context.Context, id string, request UpdateFlightRequest) (AdminFlightResponse, error)
+	updateFlight    func(ctx context.Context, id, authorization string, request UpdateFlightRequest) (AdminFlightResponse, error)
 	getFlight       func(ctx context.Context, id string) (AdminFlightResponse, error)
 	listFlights     func(ctx context.Context, request ListFlightsRequest) (AdminFlightListResponse, error)
 	searchFlights   func(ctx context.Context, request SearchFlightsRequest) (FlightListResponse, error)
@@ -46,11 +46,11 @@ func (f *fakeService) CreateFlight(ctx context.Context, request CreateFlightRequ
 	return f.createFlight(ctx, request)
 }
 
-func (f *fakeService) UpdateFlight(ctx context.Context, id string, request UpdateFlightRequest) (AdminFlightResponse, error) {
+func (f *fakeService) UpdateFlight(ctx context.Context, id, authorization string, request UpdateFlightRequest) (AdminFlightResponse, error) {
 	if f.updateFlight == nil {
 		f.t.Fatal("unexpected call to UpdateFlight")
 	}
-	return f.updateFlight(ctx, id, request)
+	return f.updateFlight(ctx, id, authorization, request)
 }
 
 func (f *fakeService) GetFlight(ctx context.Context, id string) (AdminFlightResponse, error) {
@@ -265,20 +265,27 @@ func TestGetFlight_returns404WhenTheFlightDoesNotExist(t *testing.T) {
 	require.Equal(t, "flight not found", body.Error.Message)
 }
 
-func TestUpdateFlight_passesTheIDAndOnlyTheSentFieldsToTheService(t *testing.T) {
+func TestUpdateFlight_passesTheIDTheTokenAndOnlyTheSentFieldsToTheService(t *testing.T) {
 	var (
-		gotID      string
-		gotRequest UpdateFlightRequest
+		gotID            string
+		gotAuthorization string
+		gotRequest       UpdateFlightRequest
 	)
-	svc := &fakeService{t: t, updateFlight: func(_ context.Context, id string, request UpdateFlightRequest) (AdminFlightResponse, error) {
-		gotID, gotRequest = id, request
+	svc := &fakeService{t: t, updateFlight: func(_ context.Context, id, authorization string, request UpdateFlightRequest) (AdminFlightResponse, error) {
+		gotID, gotAuthorization, gotRequest = id, authorization, request
 		return sampleAdminFlight(), nil
 	}}
+	handler := newTestHandler(svc)
+	call := func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("Authorization", "Bearer admin-token")
+		handler.UpdateFlight(w, r)
+	}
 
-	rec := callHandler(t, newTestHandler(svc).UpdateFlight, http.MethodPatch, "/api/v1/admin/flights/"+flightID, `{"price": 900000}`, flightID)
+	rec := callHandler(t, call, http.MethodPatch, "/api/v1/admin/flights/"+flightID, `{"price": 900000}`, flightID)
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Equal(t, flightID, gotID)
+	require.Equal(t, "Bearer admin-token", gotAuthorization, "booking is asked with the admin's own token")
 	require.Equal(t, UpdateFlightRequest{Price: ptr(int64(900_000))}, gotRequest)
 	require.JSONEq(t, toJSON(t, sampleAdminFlight()), rec.Body.String())
 }
@@ -308,13 +315,14 @@ func TestUpdateFlight_mapsServiceErrorsToHTTPErrors(t *testing.T) {
 			http.StatusBadRequest, "VALIDATION_ERROR", []string{"body"}},
 		{"flight not found", ErrFlightNotFound, http.StatusNotFound, "NOT_FOUND", nil},
 		{"schedule collides", ErrFlightExists, http.StatusConflict, "FLIGHT_EXISTS", nil},
-		{"capacity below sold seats", ErrCapacityBelowSold, http.StatusConflict, "CAPACITY_BELOW_SOLD", nil},
+		{"capacity below held and sold seats", ErrCapacityBelowSold, http.StatusConflict, "CAPACITY_BELOW_SOLD", nil},
+		{"booking unavailable", fmt.Errorf("get booked seats: %w", ErrBookingUnavailable), http.StatusServiceUnavailable, "BOOKING_UNAVAILABLE", nil},
 		{"unexpected error", errBoom, http.StatusInternalServerError, "INTERNAL_ERROR", nil},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := &fakeService{t: t, updateFlight: func(context.Context, string, UpdateFlightRequest) (AdminFlightResponse, error) {
+			svc := &fakeService{t: t, updateFlight: func(context.Context, string, string, UpdateFlightRequest) (AdminFlightResponse, error) {
 				return AdminFlightResponse{}, tc.err
 			}}
 

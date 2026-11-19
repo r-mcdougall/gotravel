@@ -123,6 +123,28 @@ func (s *service) holdRefusal(ctx context.Context, q queries, flightID string) e
 	}
 }
 
+// FlightSeats returns the seat counters of a flight's inventory.
+func (s *service) FlightSeats(ctx context.Context, flightID string) (FlightSeats, error) {
+	if !validUUID(flightID) {
+		return FlightSeats{}, ErrFlightNotFound
+	}
+
+	inventory, err := s.db.GetFlightInventory(ctx, flightID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return FlightSeats{}, ErrFlightNotFound
+	}
+	if err != nil {
+		return FlightSeats{}, fmt.Errorf("get flight inventory: %w", err)
+	}
+
+	return FlightSeats{
+		FlightID:  inventory.FlightID,
+		Capacity:  inventory.Capacity,
+		HeldSeats: inventory.HeldSeats,
+		SoldSeats: inventory.SoldSeats,
+	}, nil
+}
+
 func (s *service) GetBooking(ctx context.Context, userID, id string) (Response, error) {
 	if !validUUID(id) {
 		return Response{}, ErrNotFound

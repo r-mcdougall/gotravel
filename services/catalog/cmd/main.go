@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -62,6 +63,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	databaseURL := loader.Required("DATABASE_URL")
 	publicKeyFile := loader.Required("JWT_PUBLIC_KEY_FILE")
 	rabbitmqURL := loader.Required("RABBITMQ_URL")
+	bookingURL := loader.Required("BOOKING_URL")
 	redisURL := loader.String("REDIS_URL", "")
 	searchCacheTTL := loader.Duration("SEARCH_CACHE_TTL", defaultSearchCacheTTL)
 
@@ -73,6 +75,9 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	if searchCacheTTL <= 0 {
 		return fmt.Errorf("load config: SEARCH_CACHE_TTL must be positive, got %s", searchCacheTTL)
+	}
+	if u, err := url.Parse(bookingURL); err != nil || u.Host == "" {
+		return fmt.Errorf("load config: BOOKING_URL must be an absolute URL, got %q", bookingURL)
 	}
 
 	log, err := logging.New(stdout, serviceName, base.LogLevel)
@@ -119,7 +124,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			log.With(slog.String("component", "availability_consumer")))
 	})()
 
-	service := catalog.NewService(pgStore, reference, routeCache)
+	service := catalog.NewService(pgStore, reference, routeCache, catalog.NewBookingClient(bookingURL))
 	handler := catalog.NewHandler(service, log, authn.NewVerifier(publicKey))
 
 	router := httpserver.NewRouter(log, appMetrics, handler.Routes)

@@ -18,7 +18,7 @@ import (
 
 type Service interface {
 	CreateFlight(ctx context.Context, request CreateFlightRequest) (AdminFlightResponse, error)
-	UpdateFlight(ctx context.Context, id string, request UpdateFlightRequest) (AdminFlightResponse, error)
+	UpdateFlight(ctx context.Context, id, authorization string, request UpdateFlightRequest) (AdminFlightResponse, error)
 	GetFlight(ctx context.Context, id string) (AdminFlightResponse, error)
 	ListFlights(ctx context.Context, request ListFlightsRequest) (AdminFlightListResponse, error)
 	SearchFlights(ctx context.Context, request SearchFlightsRequest) (FlightListResponse, error)
@@ -129,7 +129,7 @@ func (h *Handler) UpdateFlight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := h.service.UpdateFlight(r.Context(), chi.URLParam(r, "id"), request)
+	response, err := h.service.UpdateFlight(r.Context(), chi.URLParam(r, "id"), r.Header.Get("Authorization"), request)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -149,20 +149,27 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 	case errors.Is(err, ErrFlightExists):
 		httpserver.WriteError(w, http.StatusConflict, "FLIGHT_EXISTS", "flight already exists for this departure time")
 	case errors.Is(err, ErrCapacityBelowSold):
-		httpserver.WriteError(w, http.StatusConflict, "CAPACITY_BELOW_SOLD", "capacity is lower than the number of seats already sold")
+		httpserver.WriteError(w, http.StatusConflict, "CAPACITY_BELOW_SOLD", "capacity is lower than the seats already held or sold")
+	case errors.Is(err, ErrBookingUnavailable):
+		h.logError(r, "booking service unavailable", err)
+		httpserver.WriteError(w, http.StatusServiceUnavailable, "BOOKING_UNAVAILABLE", "the booking service is unavailable, try again later")
 	default:
 		h.internalError(w, r, err)
 	}
 }
 
 func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, err error) {
-	h.log.ErrorContext(r.Context(), "request failed",
+	h.logError(r, "request failed", err)
+	httpserver.WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
+}
+
+func (h *Handler) logError(r *http.Request, message string, err error) {
+	h.log.ErrorContext(r.Context(), message,
 		slog.String("request_id", httpserver.RequestIDFrom(r.Context())),
 		slog.String("method", r.Method),
 		slog.String("path", r.URL.Path),
 		slog.Any("error", err),
 	)
-	httpserver.WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
 }
 
 func invalidBody(w http.ResponseWriter) {

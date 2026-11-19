@@ -115,7 +115,7 @@ func TestFlightsInPostgres_createRejectsADuplicateWithoutWritingAnotherEvent(t *
 
 func TestFlightsInPostgres_createRollsBackTheFlightWhenTheOutboxInsertFails(t *testing.T) {
 	e := newEnv(t)
-	svc := NewService(failingOutboxStore{PgStore: e.pgStore}, e.reference, nil)
+	svc := NewService(failingOutboxStore{PgStore: e.pgStore}, e.reference, nil, e.seats)
 
 	_, err := svc.CreateFlight(t.Context(), validCreateRequest())
 
@@ -127,9 +127,9 @@ func TestFlightsInPostgres_createRollsBackTheFlightWhenTheOutboxInsertFails(t *t
 func TestFlightsInPostgres_updateRollsBackTheChangeWhenTheOutboxInsertFails(t *testing.T) {
 	e := newEnv(t)
 	created := e.createFlight(t, nil)
-	svc := NewService(failingOutboxStore{PgStore: e.pgStore}, e.reference, nil)
+	svc := NewService(failingOutboxStore{PgStore: e.pgStore}, e.reference, nil, e.seats)
 
-	_, err := svc.UpdateFlight(t.Context(), created.ID, UpdateFlightRequest{Price: ptr(int64(900_000))})
+	_, err := svc.UpdateFlight(t.Context(), created.ID, adminAuthorization, UpdateFlightRequest{Price: ptr(int64(900_000))})
 
 	require.ErrorIs(t, err, errBoom)
 	require.Equal(t, flightRow{Version: 1, Capacity: 180, AvailableSeats: 180}, e.flightRow(t, created.ID))
@@ -142,7 +142,7 @@ func TestFlightsInPostgres_updateBumpsTheVersionAndRecordsASecondEvent(t *testin
 	e := newEnv(t)
 	created := e.createFlight(t, nil)
 
-	updated, err := e.service.UpdateFlight(t.Context(), created.ID, UpdateFlightRequest{Price: ptr(int64(900_000))})
+	updated, err := e.service.UpdateFlight(t.Context(), created.ID, adminAuthorization, UpdateFlightRequest{Price: ptr(int64(900_000))})
 	require.NoError(t, err)
 
 	require.Equal(t, int64(900_000), updated.Price)
@@ -160,19 +160,23 @@ func TestFlightsInPostgres_updateKeepsSoldSeatsSoldWhenCapacityChanges(t *testin
 	created := e.createFlight(t, nil)
 	e.setAvailableSeats(t, created.ID, 42) // 138 of 180 seats sold
 
-	updated, err := e.service.UpdateFlight(t.Context(), created.ID, UpdateFlightRequest{Capacity: ptr(int32(150))})
+	updated, err := e.service.UpdateFlight(t.Context(), created.ID, adminAuthorization, UpdateFlightRequest{Capacity: ptr(int32(150))})
 	require.NoError(t, err)
 
 	require.Equal(t, int32(12), updated.AvailableSeats)
 	require.Equal(t, flightRow{Version: 2, Capacity: 150, AvailableSeats: 12}, e.flightRow(t, created.ID))
 }
 
-func TestFlightsInPostgres_updateRejectsCapacityBelowTheSoldSeatsAndChangesNothing(t *testing.T) {
+func TestFlightsInPostgres_updateRejectsCapacityBelowTheSeatsBookingHoldsAndChangesNothing(t *testing.T) {
 	e := newEnv(t)
 	created := e.createFlight(t, nil)
-	e.setAvailableSeats(t, created.ID, 42) // 138 of 180 seats sold
+	e.setAvailableSeats(t, created.ID, 42) // 138 of 180 seats taken
+	booking := &fakeSeats{t: t, flightSeats: func(string, string) (BookedSeats, bool, error) {
+		return BookedSeats{HeldSeats: 8, SoldSeats: 130}, true, nil
+	}}
+	svc := NewService(e.pgStore, e.reference, nil, booking)
 
-	_, err := e.service.UpdateFlight(t.Context(), created.ID, UpdateFlightRequest{Capacity: ptr(int32(137))})
+	_, err := svc.UpdateFlight(t.Context(), created.ID, adminAuthorization, UpdateFlightRequest{Capacity: ptr(int32(137))})
 
 	require.ErrorIs(t, err, ErrCapacityBelowSold)
 	require.Equal(t, flightRow{Version: 1, Capacity: 180, AvailableSeats: 42}, e.flightRow(t, created.ID))
@@ -187,7 +191,7 @@ func TestFlightsInPostgres_updateReportsAScheduleThatCollidesWithAnotherFlight(t
 		r.ArrivalAt = time.Date(2026, 11, 21, 8, 55, 0, 0, wita)
 	})
 
-	_, err := e.service.UpdateFlight(t.Context(), second.ID, UpdateFlightRequest{
+	_, err := e.service.UpdateFlight(t.Context(), second.ID, adminAuthorization, UpdateFlightRequest{
 		DepartureAt: &first.DepartureAt,
 		ArrivalAt:   &first.ArrivalAt,
 	})
@@ -292,7 +296,7 @@ func TestFlightsInPostgres_searchFindsFlightsByTheLocalDateAtTheOrigin(t *testin
 		r.ArrivalAt = time.Date(2026, 11, 20, 10, 55, 0, 0, wib)
 	})
 	// The clock is pinned so the test keeps working once these dates are in the past.
-	service := newService(e.pgStore, e.reference, nil, func() time.Time {
+	service := newService(e.pgStore, e.reference, nil, e.seats, func() time.Time {
 		return time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	})
 
@@ -339,7 +343,7 @@ func TestFlightsInPostgres_searchHidesFlightsThatHaveDepartedButDetailStillShows
 	e := newEnv(t)
 	flight := e.createFlight(t, nil) // departs 2026-11-20 06:00 WIB
 	afterDeparture := func() time.Time { return time.Date(2026, 11, 20, 6, 0, 0, 0, wib) }
-	service := newService(e.pgStore, e.reference, nil, afterDeparture)
+	service := newService(e.pgStore, e.reference, nil, e.seats, afterDeparture)
 
 	response, err := service.SearchFlights(t.Context(), validSearchRequest())
 	require.NoError(t, err)

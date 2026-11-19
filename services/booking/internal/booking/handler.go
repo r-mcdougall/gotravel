@@ -19,6 +19,7 @@ type Service interface {
 	ListBookings(ctx context.Context, userID string, request ListRequest) (ListResponse, error)
 	CancelBooking(ctx context.Context, userID, id string) (Response, error)
 	Analytics(ctx context.Context, request AnalyticsRequest) (Analytics, error)
+	FlightSeats(ctx context.Context, flightID string) (FlightSeats, error)
 }
 
 type Handler struct {
@@ -44,7 +45,13 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/api/v1/bookings/{id}", h.GetBooking)
 		r.Post("/api/v1/bookings/{id}/cancel", h.CancelBooking)
 
-		r.With(authn.RequireRole(authn.RoleAdmin)).Get("/api/v1/admin/analytics/bookings", h.Analytics)
+		r.Group(func(r chi.Router) {
+			r.Use(authn.RequireRole(authn.RoleAdmin))
+
+			r.Get("/api/v1/admin/analytics/bookings", h.Analytics)
+			// Internal: catalog calls it with the admin's token; the gateway does not route /internal.
+			r.Get("/internal/v1/flights/{id}/seats", h.FlightSeats)
+		})
 	})
 }
 
@@ -85,6 +92,16 @@ func (h *Handler) Analytics(w http.ResponseWriter, r *http.Request) {
 	request := AnalyticsRequest{From: query.Get("from"), To: query.Get("to")}
 
 	response, err := h.service.Analytics(r.Context(), request)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) FlightSeats(w http.ResponseWriter, r *http.Request) {
+	response, err := h.service.FlightSeats(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return

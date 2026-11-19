@@ -22,7 +22,7 @@
 
 - **Decision:** `booking` keeps the seat counts, updated from `catalog` events, so a hold is a single local transaction.
 - **Rejected:** `catalog` owns seats and `booking` reserves over HTTP (one hold would touch two databases and need compensation).
-- **Trade-off:** capacity changes reach `booking` asynchronously and cannot be rejected. Lowering capacity below the seats already sold is therefore validated with a synchronous call from `catalog` to `booking`.
+- **Trade-off:** capacity changes reach `booking` asynchronously and cannot be rejected. Lowering capacity below the seats already held or sold is therefore checked with a synchronous call from `catalog` to `booking` first (decision 33).
 
 ## 5. JWT signed with EdDSA
 
@@ -97,6 +97,8 @@
 - **Trade-off:** a search that read the database just before an admin write or a seat report can store old data for up to one TTL, so prices and `available_seats` can be up to 60 seconds old. While Redis is down, every search logs a warning (not rate limited) and can wait up to the 100 ms client timeout.
 
 ## 17. Capacity is checked locally until booking exists
+
+Superseded by decision 33.
 
 - **Decision:** every create and update writes a `flight.changed` event to the outbox in the same transaction (decision 3). Until `booking` exists, lowering capacity is checked against the catalog's own `available_seats`, which moves by the same amount as capacity, and fails with 409 `CAPACITY_BELOW_SOLD`.
 - **Rejected:** calling a booking service that does not exist yet.
@@ -191,3 +193,9 @@
 - **Decision:** `GET /api/v1/admin/analytics/bookings` (admin role) summarizes bookings created in a period of whole UTC days (30 days up to today by default, at most 366): bookings per current status, revenue as the total price of confirmed bookings, and the 10 routes with the most confirmed bookings. Two aggregate queries run on every request, without a cache or a new index.
 - **Rejected:** a reporting table or materialized view kept up to date by events (more moving parts for a small admin page); counting by departure date (an operations report, not a sales report); counting holds in the popular routes.
 - **Trade-off:** the queries scan the bookings of the period, which is fine at this size; an index on `bookings (created_at)` is the next step if it grows. The two queries do not share a snapshot, so a booking that changes status in between can appear in one figure under its old status.
+
+## 33. Catalog asks booking before lowering a capacity
+
+- **Decision:** before lowering a capacity, catalog calls booking's internal `GET /internal/v1/flights/{id}/seats` with the admin's token, outside the transaction, and refuses a capacity below `held_seats + sold_seats` (409 `CAPACITY_BELOW_SOLD`). A flight booking does not know yet has nothing taken; if booking cannot answer, the decrease fails with 503 `BOOKING_UNAVAILABLE`.
+- **Rejected:** the local check of decision 17 (its copy lags behind holds); a service-to-service token; calling booking inside the transaction.
+- **Trade-off:** a hold made between the check and the new capacity reaching booking can still exceed it (booking then reports zero free seats), and lowering a capacity needs booking to be up.
