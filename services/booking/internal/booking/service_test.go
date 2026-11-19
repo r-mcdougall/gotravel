@@ -110,6 +110,16 @@ func (s unusedStore) SellHeldSeats(context.Context, store.SellHeldSeatsParams) e
 	return nil
 }
 
+func (s unusedStore) SummarizeBookingsByStatus(context.Context, store.SummarizeBookingsByStatusParams) ([]store.SummarizeBookingsByStatusRow, error) {
+	s.fail("SummarizeBookingsByStatus")
+	return nil, nil
+}
+
+func (s unusedStore) ListTopRoutes(context.Context, store.ListTopRoutesParams) ([]store.ListTopRoutesRow, error) {
+	s.fail("ListTopRoutes")
+	return nil, nil
+}
+
 func (s unusedStore) InTx(context.Context, func(queries) error) error {
 	s.fail("InTx")
 	return nil

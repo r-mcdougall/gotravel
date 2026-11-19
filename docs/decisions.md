@@ -185,4 +185,9 @@
 - **Decision:** booking consumes `payment.succeeded` and, in one transaction, confirms a booking that is still `HELD`, stores the `payment_id` and moves its seats from held to sold. Free seats do not change, so no availability report is sent. The expirer and the confirmation lock the same row, so exactly one wins. A booking that is no longer held answers with `payment.rejected` (`booking_expired`, `booking_cancelled`, `booking_not_found` or `booking_paid_by_another_payment`), and payment marks that payment `REVERSED`. A repeated message for a booking confirmed by the same payment changes nothing.
 - **Rejected:** payment calling booking to confirm synchronously (a charged payment would need its own retry when booking is down); refusing a confirmation after `expires_at` (a payment made in time would lose to delivery delay); a refund flow.
 - **Trade-off:** a paid booking stays `HELD` for the relay and consumer delay, about a second. A rejected payment shows `SUCCEEDED` until the reversal arrives, and nobody is notified of the reversal.
-  
+
+## 32. Booking analytics are live aggregates over booking's own tables
+
+- **Decision:** `GET /api/v1/admin/analytics/bookings` (admin role) summarizes bookings created in a period of whole UTC days (30 days up to today by default, at most 366): bookings per current status, revenue as the total price of confirmed bookings, and the 10 routes with the most confirmed bookings. Two aggregate queries run on every request, without a cache or a new index.
+- **Rejected:** a reporting table or materialized view kept up to date by events (more moving parts for a small admin page); counting by departure date (an operations report, not a sales report); counting holds in the popular routes.
+- **Trade-off:** the queries scan the bookings of the period, which is fine at this size; an index on `bookings (created_at)` is the next step if it grows. The two queries do not share a snapshot, so a booking that changes status in between can appear in one figure under its old status.

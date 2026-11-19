@@ -28,6 +28,8 @@ type queries interface {
 	ConfirmBooking(ctx context.Context, arg store.ConfirmBookingParams) (store.Booking, error)
 	GetBookingPayment(ctx context.Context, id string) (store.GetBookingPaymentRow, error)
 	SellHeldSeats(ctx context.Context, arg store.SellHeldSeatsParams) error
+	SummarizeBookingsByStatus(ctx context.Context, arg store.SummarizeBookingsByStatusParams) ([]store.SummarizeBookingsByStatusRow, error)
+	ListTopRoutes(ctx context.Context, arg store.ListTopRoutesParams) ([]store.ListTopRoutesRow, error)
 }
 
 var _ queries = (*store.Queries)(nil)
