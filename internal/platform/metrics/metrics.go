@@ -14,6 +14,9 @@ import (
 
 const unmatchedRoute = "unmatched"
 
+// durationBuckets start at 1 ms so fast routes such as search get real quantiles, and stop at 5 s, past the 2-second timeout of calls between services.
+var durationBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
+
 type Metrics struct {
 	registry *prometheus.Registry
 	requests *prometheus.CounterVec
@@ -32,7 +35,7 @@ func New() *Metrics {
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "http_request_duration_seconds",
 			Help:    "HTTP request latency in seconds.",
-			Buckets: prometheus.DefBuckets,
+			Buckets: durationBuckets,
 		}, labels),
 		inFlight: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "http_requests_in_flight",
