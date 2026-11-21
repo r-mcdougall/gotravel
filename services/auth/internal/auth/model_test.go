@@ -79,6 +79,11 @@ func TestLoginRequestValidate(t *testing.T) {
 		{"missing email", LoginRequest{Password: "x"}, []string{"email"}},
 		{"missing password", LoginRequest{Email: "john.doe@example.com"}, []string{"password"}},
 		{"nothing set", LoginRequest{}, []string{"email", "password"}},
+		{"email of 254 characters", LoginRequest{Email: strings.Repeat("a", 242) + "@example.com", Password: "x"}, nil},
+		{"email over 254 characters", LoginRequest{Email: strings.Repeat("a", 243) + "@example.com", Password: "x"}, []string{"email"}},
+		{"password of 72 bytes", LoginRequest{Email: "john.doe@example.com", Password: strings.Repeat("a", 72)}, nil},
+		{"password of 73 bytes", LoginRequest{Email: "john.doe@example.com", Password: strings.Repeat("a", 73)}, []string{"password"}},
+		{"password counted in bytes not characters", LoginRequest{Email: "john.doe@example.com", Password: strings.Repeat("é", 37)}, []string{"password"}},
 	}
 
 	for _, tt := range tests {

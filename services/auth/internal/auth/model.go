@@ -71,7 +71,10 @@ func (r *LoginRequest) Validate() error {
 	var v ValidationError
 
 	v.check(r.Email != "", "email", "is required")
+	v.check(len(r.Email) <= maxEmailLen, "email", "must be at most 254 characters")
 	v.check(r.Password != "", "password", "is required")
+	// bcrypt ignores everything after 72 bytes, so a longer password would match on its first 72 bytes.
+	v.check(len(r.Password) <= maxPasswordBytes, "password", "must be at most 72 bytes")
 
 	return v.err()
 }
