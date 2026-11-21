@@ -9,7 +9,9 @@ info:
 
 tags:
   - name: auth
+    description: Registration, login and tokens.
   - name: users
+    description: Profile of the signed-in user.
 
 servers:
   - url: http://localhost:8080
@@ -365,7 +367,6 @@ components:
                 - INVALID_CREDENTIALS
                 - INVALID_REFRESH_TOKEN
                 - UNAUTHORIZED
-                - FORBIDDEN
                 - NOT_FOUND
                 - INTERNAL_ERROR
             message:
