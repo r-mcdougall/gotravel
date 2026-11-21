@@ -221,6 +221,24 @@ services:
       retries: 5
       start_period: 20s
 
+  # Load test, started only by make loadtest. Settings come from the shell, e.g.
+  # RATE=200 make loadtest, or SCENARIO=stress make loadtest (see loadtest/search.js).
+  k6:
+    image: grafana/k6:2.4.0
+    profiles: [loadtest]
+    command: ["run", "/scripts/search.js"]
+    environment:
+      BASE_URL: http://gateway
+      SCENARIO: ${SCENARIO:-steady}
+      RATE: ${RATE:-100}
+      HOLD: ${HOLD:-3m}
+      STEPS: ${STEPS:-100,250,500,750,1000}
+    volumes:
+      - ./loadtest:/scripts:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+
   gateway:
     image: nginx:1.30.6-alpine
     restart: unless-stopped

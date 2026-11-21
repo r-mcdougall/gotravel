@@ -72,6 +72,18 @@ func TestMiddleware_groupsUnmatchedPathsUnderOneRoute(t *testing.T) {
 	require.NotContains(t, body, `route="/nope"`)
 }
 
+func TestMiddleware_recordsLatencyFromOneMillisecond(t *testing.T) {
+	m := metrics.New()
+
+	get(t, newRouter(m), "/flights/1")
+
+	body := scrape(t, m)
+	for _, le := range []string{"0.001", "0.0025", "0.5", "5"} {
+		require.Contains(t, body, `http_request_duration_seconds_bucket{method="GET",route="/flights/{id}",status="200",le="`+le+`"}`)
+	}
+	require.NotContains(t, body, `le="10"`)
+}
+
 func TestHandler_exposesRuntimeMetrics(t *testing.T) {
 	require.Contains(t, scrape(t, metrics.New()), "go_goroutines")
 }
