@@ -1,7 +1,8 @@
-# Load test: flight search
+# Load tests
 
 Flight search was load tested with [k6](https://k6.io) through the gateway to check the target (p95 under
-500 ms) and to find where the system stops keeping up.
+500 ms) and to find where the system stops keeping up. A second test sends concurrent holds for one flight
+to check that seats are never oversold ([Concurrent holds](#concurrent-holds)).
 
 ## Summary
 
@@ -98,10 +99,27 @@ What stops each run:
   pool has no metrics, so this fits the data but is not measured.
 - **With the cache**, catalog CPU keeps rising to about 480%. The limit is most likely the laptop itself.
 
+## Concurrent holds
+
+[`loadtest/holds.js`](../loadtest/holds.js) creates a flight with 100 seats, then 200 VUs each send 5
+holds of 1 to 3 passengers at once (`LOADTEST=holds make loadtest`). Every hold must answer `201` or
+`409 NOT_ENOUGH_SEATS`, and the seats held must end between 98 and 100.
+
+| Source | Seats held |
+|---|---|
+| k6, sum of successful holds | 100 |
+| booking inventory, `held_seats` | 100 of 100 |
+| booking, `HELD` bookings | 100 in 48 bookings |
+| catalog, `available_seats` | 0 |
+
+The 1,000 holds arrived within half a second: 48 succeeded, 952 were refused with `409`, none failed.
+No seat was sold twice and none was lost. Holds waited for the same inventory row lock, so p95 was
+211 ms.
+
 ## Limitations
 
 - **One shared laptop.** Results vary between runs at high load, and a short stall shows up as dropped
   requests and a long maximum, so maximum latency is not reported.
 - **Small data set.** With more routes and dates, more searches would miss the cache.
-- **Search only.** No holds or payments run during the test.
+- **No mixed load.** Search and holds were tested separately, and payments not at all.
 - **No overload protection.** Past its capacity, catalog's latency and memory grow until the load drops.
