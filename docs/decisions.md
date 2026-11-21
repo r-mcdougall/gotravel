@@ -94,7 +94,7 @@
 
 - **Decision:** the rows of a route-day are cached for 60 seconds (`SEARCH_CACHE_TTL`), keyed by route and local date, so every search of that day shares one entry. An admin create or update deletes the affected day after commit (both the old and the new day when the schedule moves), and so does every seat report from booking (decision 28). With `REDIS_URL` empty the cache is off, and on any Redis error search reads the database. Redis is never the source of truth.
 - **Rejected:** caching whole responses per query (low hit rate); deleting before commit (a search in between could cache the old data again).
-- **Trade-off:** a search that read the database just before an admin write or a seat report can store old data for up to one TTL, so prices and `available_seats` can be up to 60 seconds old. While Redis is down, every search logs a warning (not rate limited) and can wait up to the 100 ms client timeout.
+- **Trade-off:** a search that read the database just before an admin write or a seat report can store old data for up to one TTL, so prices and `available_seats` can be up to 60 seconds old. While Redis is down, every search logs a warning (not rate limited) and can wait up to the 100 ms client timeout. The load test (decision 34) shows the cache does not cut latency at this data size: it moves about 0.5 ms of the 1.8 ms of CPU per search from PostgreSQL into catalog, which can be scaled out.
 
 ## 17. Capacity is checked locally until booking exists
 
@@ -199,3 +199,10 @@ Superseded by decision 33.
 - **Decision:** before lowering a capacity, catalog calls booking's internal `GET /internal/v1/flights/{id}/seats` with the admin's token, outside the transaction, and refuses a capacity below `held_seats + sold_seats` (409 `CAPACITY_BELOW_SOLD`). A flight booking does not know yet has nothing taken; if booking cannot answer, the decrease fails with 503 `BOOKING_UNAVAILABLE`.
 - **Rejected:** the local check of decision 17 (its copy lags behind holds); a service-to-service token; calling booking inside the transaction.
 - **Trade-off:** a hold made between the check and the new capacity reaching booking can still exceed it (booking then reports zero free seats), and lowering a capacity needs booking to be up.
+
+## 34. Search is load tested on one laptop and left untuned
+
+- **Decision:** k6 drives flight search through the gateway at a fixed arrival rate, steady and in steps, on the same laptop as the stack. Results are in `docs/load-test.md`: p95 11 ms at 1,800 req/s, peak about 2,700 req/s, no errors.
+- **Rejected:** tuning the connection pool or adding load shedding (the target holds with a wide margin); a separate load generator machine.
+- **Trade-off:** the numbers describe this laptop, not production, and vary between runs at high load. Past its peak, catalog queues requests without limit.
+  
