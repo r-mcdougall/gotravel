@@ -512,7 +512,7 @@ components:
           type: integer
           format: int32
           minimum: 1
-          description: Must not be lower than the number of seats already sold.
+          description: Must not be lower than the seats booking holds and has sold.
 
     Airline:
       type: object
