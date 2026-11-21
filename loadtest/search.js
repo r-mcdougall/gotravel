@@ -23,7 +23,8 @@ const scenarios = {
         executor: 'ramping-arrival-rate',
         startRate: 10,
         timeUnit: '1s',
-        preAllocatedVUs: 50,
+        // Every VU is created before the run: creating one mid-run is slow and drops iterations.
+        preAllocatedVUs: 300,
         maxVUs: 300,
         stages: [
             { target: RATE, duration: '1m' },
