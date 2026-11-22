@@ -192,7 +192,9 @@ make fmt      # gofmt and goimports
 make sqlc     # regenerate the query code after changing SQL
 ```
 
-CI runs lint, the tests and an image build for every service.
+CI runs lint, the tests, a check that the sqlc code is up to date, and an image build for every
+service. Every version tag also publishes one image per service to the GitHub Container Registry, e.g.
+`ghcr.io/r-mcdougall/gotravel-booking:1.0.1`; `make up` still builds the images from source.
 
 ```
 services/<name>/     cmd (main), internal/<name> (handlers, service, events), migrations, queries, openapi.yaml
