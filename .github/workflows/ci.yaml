@@ -33,6 +33,23 @@ jobs:
           go-version-file: go.mod
       - run: make test
 
+  sqlc:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make sqlc
+      - name: Check that the generated code is committed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            git diff
+            echo "::error::sqlc output differs from the committed code; run make sqlc and commit the result"
+            exit 1
+          fi
+
   image:
     runs-on: ubuntu-24.04
     strategy:
