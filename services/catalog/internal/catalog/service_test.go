@@ -29,6 +29,7 @@ type fakeStore struct {
 	insertOutboxEvent     func(context.Context, store.InsertOutboxEventParams) error
 	createHotel           func(context.Context, store.CreateHotelParams) (store.Hotel, error)
 	createRoomType        func(context.Context, store.CreateRoomTypeParams) (store.RoomType, error)
+	listRoomTypesByCity   func(context.Context, store.ListRoomTypesByCityParams) ([]store.ListRoomTypesByCityRow, error)
 }
 
 func (f *fakeStore) CreateFlight(ctx context.Context, arg store.CreateFlightParams) (store.Flight, error) {
@@ -109,6 +110,14 @@ func (f *fakeStore) CreateRoomType(ctx context.Context, arg store.CreateRoomType
 		f.t.Fatal("unexpected call to CreateRoomType")
 	}
 	return f.createRoomType(ctx, arg)
+}
+
+func (f *fakeStore) ListRoomTypesByCity(ctx context.Context, arg store.ListRoomTypesByCityParams) ([]store.ListRoomTypesByCityRow, error) {
+	f.t.Helper()
+	if f.listRoomTypesByCity == nil {
+		f.t.Fatal("unexpected call to ListRoomTypesByCity")
+	}
+	return f.listRoomTypesByCity(ctx, arg)
 }
 
 func (f *fakeStore) InTx(_ context.Context, fn func(queries) error) error {

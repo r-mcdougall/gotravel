@@ -28,6 +28,7 @@ type queries interface {
 	InsertOutboxEvent(ctx context.Context, arg store.InsertOutboxEventParams) error
 	CreateHotel(ctx context.Context, arg store.CreateHotelParams) (store.Hotel, error)
 	CreateRoomType(ctx context.Context, arg store.CreateRoomTypeParams) (store.RoomType, error)
+	ListRoomTypesByCity(ctx context.Context, arg store.ListRoomTypesByCityParams) ([]store.ListRoomTypesByCityRow, error)
 }
 
 var _ queries = (*store.Queries)(nil)

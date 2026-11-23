@@ -41,12 +41,18 @@ func sampleRoomType() store.RoomType {
 // newTestHotelService returns the concrete service, whose hotel methods are not on the Service interface yet.
 func newTestHotelService(t *testing.T, db *fakeStore) *service {
 	t.Helper()
+	return newTestHotelServiceAt(t, db, time.Now())
+}
+
+// newTestHotelServiceAt pins the clock, so tests decide which check-in dates are in the past.
+func newTestHotelServiceAt(t *testing.T, db *fakeStore, now time.Time) *service {
+	t.Helper()
 	db.t = t
 
 	reference, err := LoadReference(t.Context(), sampleReferenceQueries(t))
 	require.NoError(t, err)
 
-	return newService(db, reference, nil, &fakeSeats{t: t}, time.Now)
+	return newService(db, reference, nil, &fakeSeats{t: t}, func() time.Time { return now })
 }
 
 // hotelDB stores what it is given the way PostgreSQL would and logs every call in order.
@@ -318,4 +324,168 @@ func TestHotelsInPostgres_createRollsBackTheHotelAndItsRoomTypesWhenTheOutboxIns
 
 	require.ErrorIs(t, err, errBoom)
 	require.Equal(t, hotelRowCounts{}, e.hotelRowCounts(t))
+}
+
+// hotelSearchNow is a week before the check-in of validSearchHotelsRequest.
+var hotelSearchNow = time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+
+func TestServiceSearchHotels_asksForTheCitysRoomTypesForTheGuestsAndPagesTheHotels(t *testing.T) {
+	var got store.ListRoomTypesByCityParams
+	db := &fakeStore{
+		listRoomTypesByCity: func(_ context.Context, arg store.ListRoomTypesByCityParams) ([]store.ListRoomTypesByCityRow, error) {
+			got = arg
+			return hotelSearchFixture(), nil
+		},
+	}
+	svc := newTestHotelServiceAt(t, db, hotelSearchNow)
+	request := validSearchHotelsRequest()
+	request.Guests = 2
+	request.PageSize = 2
+
+	response, err := svc.SearchHotels(t.Context(), request)
+	require.NoError(t, err)
+
+	require.Equal(t, store.ListRoomTypesByCityParams{CityCode: "DPS", Guests: 2}, got)
+	require.Equal(t, []string{"budget", "garden"}, hotelIDs(response.Data))
+	require.Equal(t, CityResponse{Code: "DPS", Name: "Denpasar"}, response.Data[0].City, "the city name comes from the reference data")
+	require.Equal(t, PageMeta{Page: 1, PageSize: 2, Total: 3}, response.Meta)
+}
+
+func TestServiceSearchHotels_rejectsACheckInBeforeTodayInUTCWithoutQuerying(t *testing.T) {
+	// 02:00 WIB on the 24th is still the 23rd in UTC, so the local yesterday passes.
+	now := time.Date(2026, 11, 24, 2, 0, 0, 0, wib)
+	tests := []struct {
+		name    string
+		checkIn time.Time
+		valid   bool
+	}{
+		{"today in UTC", time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC), true},
+		{"the day before today in UTC", time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &fakeStore{}
+			if tc.valid {
+				db.listRoomTypesByCity = func(context.Context, store.ListRoomTypesByCityParams) ([]store.ListRoomTypesByCityRow, error) {
+					return nil, nil
+				}
+			}
+			svc := newTestHotelServiceAt(t, db, now)
+			request := validSearchHotelsRequest()
+			request.CheckIn = tc.checkIn
+			request.CheckOut = tc.checkIn.AddDate(0, 0, 2)
+
+			_, err := svc.SearchHotels(t.Context(), request)
+
+			if tc.valid {
+				require.NoError(t, err)
+				return
+			}
+			require.Equal(t, []string{"check_in"}, invalidFields(t, err))
+		})
+	}
+}
+
+func TestServiceSearchHotels_rejectsAnInvalidRequestWithoutQuerying(t *testing.T) {
+	svc := newTestHotelServiceAt(t, &fakeStore{}, hotelSearchNow)
+	request := validSearchHotelsRequest()
+	request.Guests = 0
+
+	_, err := svc.SearchHotels(t.Context(), request)
+
+	require.Equal(t, []string{"guests"}, invalidFields(t, err))
+}
+
+func TestServiceSearchHotels_returnsAnEmptyListForAnUnknownCityWithoutQuerying(t *testing.T) {
+	svc := newTestHotelServiceAt(t, &fakeStore{}, hotelSearchNow)
+	request := validSearchHotelsRequest()
+	request.City = "TYO" // a real city, but not in the sample reference data
+
+	response, err := svc.SearchHotels(t.Context(), request)
+
+	require.NoError(t, err)
+	require.NotNil(t, response.Data, "data must encode as [] and not null")
+	require.Empty(t, response.Data)
+	require.Equal(t, PageMeta{Page: 1, PageSize: 20, Total: 0}, response.Meta)
+}
+
+func TestServiceSearchHotels_returnsAnEmptyListWhenNoRoomTypeFits(t *testing.T) {
+	db := &fakeStore{
+		listRoomTypesByCity: func(context.Context, store.ListRoomTypesByCityParams) ([]store.ListRoomTypesByCityRow, error) {
+			return nil, nil
+		},
+	}
+	svc := newTestHotelServiceAt(t, db, hotelSearchNow)
+
+	response, err := svc.SearchHotels(t.Context(), validSearchHotelsRequest())
+
+	require.NoError(t, err)
+	require.NotNil(t, response.Data)
+	require.Empty(t, response.Data)
+}
+
+func TestServiceSearchHotels_wrapsADatabaseFailure(t *testing.T) {
+	db := &fakeStore{
+		listRoomTypesByCity: func(context.Context, store.ListRoomTypesByCityParams) ([]store.ListRoomTypesByCityRow, error) {
+			return nil, errBoom
+		},
+	}
+	svc := newTestHotelServiceAt(t, db, hotelSearchNow)
+
+	_, err := svc.SearchHotels(t.Context(), validSearchHotelsRequest())
+
+	require.ErrorIs(t, err, errBoom)
+}
+
+func TestHotelsInPostgres_searchFindsTheCitysHotelsWithARoomForTheGuests(t *testing.T) {
+	e := newEnv(t)
+	create := func(name, city string, rooms ...RoomTypeRequest) string {
+		t.Helper()
+		request := validCreateHotelRequest()
+		request.Name, request.CityCode, request.RoomTypes = name, city, rooms
+		created, err := e.hotelService().CreateHotel(t.Context(), request)
+		require.NoError(t, err)
+		return created.ID
+	}
+	garden := create("Seminyak Garden Hotel", "DPS",
+		RoomTypeRequest{Name: "Deluxe Double", MaxGuests: 2, TotalRooms: 20, PricePerNight: 850_000},
+		RoomTypeRequest{Name: "Family Suite", MaxGuests: 4, TotalRooms: 5, PricePerNight: 1_600_000})
+	budget := create("Kuta Budget Inn", "DPS",
+		RoomTypeRequest{Name: "Twin", MaxGuests: 2, TotalRooms: 10, PricePerNight: 450_000})
+	create("Jakarta Family Hotel", "JKT",
+		RoomTypeRequest{Name: "Family Room", MaxGuests: 4, TotalRooms: 10, PricePerNight: 1_000_000})
+	svc := newService(e.pgStore, e.reference, nil, e.seats, func() time.Time { return hotelSearchNow })
+
+	search := func(guests int32) HotelListResponse {
+		t.Helper()
+		request := validSearchHotelsRequest()
+		request.Guests = guests
+		response, err := svc.SearchHotels(t.Context(), request)
+		require.NoError(t, err)
+		return response
+	}
+
+	t.Run("two guests fit every room type in the city", func(t *testing.T) {
+		response := search(2)
+
+		require.Equal(t, []string{budget, garden}, hotelIDs(response.Data))
+		require.Equal(t, []string{"Deluxe Double", "Family Suite"}, roomTypeNames(response.Data[1]))
+		require.Equal(t, int64(3_200_000), response.Data[1].RoomTypes[1].TotalPrice, "two nights")
+	})
+	t.Run("three guests need a family room", func(t *testing.T) {
+		response := search(3)
+
+		require.Equal(t, []string{garden}, hotelIDs(response.Data))
+		require.Equal(t, []string{"Family Suite"}, roomTypeNames(response.Data[0]))
+		require.Equal(t, int64(1_600_000), response.Data[0].LowestPricePerNight)
+	})
+}
+
+func roomTypeNames(hotel HotelResponse) []string {
+	names := make([]string, len(hotel.RoomTypes))
+	for i, room := range hotel.RoomTypes {
+		names[i] = room.Name
+	}
+	return names
 }
