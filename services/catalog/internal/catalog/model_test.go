@@ -1,6 +1,8 @@
 package catalog
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -320,4 +322,242 @@ func TestSearchFlightsRequestValidate_doesNotReportASameAirportWhenBothCodesAreE
 	err := request.Validate()
 
 	require.Equal(t, []string{"origin", "destination"}, invalidFields(t, err))
+}
+
+func validCreateHotelRequest() CreateHotelRequest {
+	return CreateHotelRequest{
+		Name:       "Seminyak Garden Hotel",
+		CityCode:   "DPS",
+		Address:    "Jl. Raya Seminyak 12, Badung",
+		StarRating: 4,
+		RoomTypes: []RoomTypeRequest{
+			{Name: "Deluxe Double", MaxGuests: 2, TotalRooms: 20, PricePerNight: 850_000},
+			{Name: "Family Suite", MaxGuests: 4, TotalRooms: 5, PricePerNight: 1_600_000},
+		},
+	}
+}
+
+func TestCreateHotelRequestNormalize_trimsEveryText(t *testing.T) {
+	request := validCreateHotelRequest()
+	request.Name = "  Seminyak Garden Hotel\t"
+	request.Address = "\n Jl. Raya Seminyak 12, Badung "
+	request.RoomTypes[1].Name = " Family Suite "
+
+	request.normalize()
+
+	require.Equal(t, validCreateHotelRequest(), request)
+}
+
+func TestCreateHotelRequestValidate_acceptsAValidRequestAndTheLimits(t *testing.T) {
+	tenRoomTypes := make([]RoomTypeRequest, maxRoomTypes)
+	for i := range tenRoomTypes {
+		tenRoomTypes[i] = RoomTypeRequest{Name: fmt.Sprintf("Room %d", i+1), MaxGuests: 2, TotalRooms: 1, PricePerNight: 1}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(r *CreateHotelRequest)
+	}{
+		{"valid request", func(*CreateHotelRequest) {}},
+		{"longest name", func(r *CreateHotelRequest) { r.Name = strings.Repeat("a", maxHotelNameLength) }},
+		{"longest name counted in characters, not bytes", func(r *CreateHotelRequest) { r.Name = strings.Repeat("é", maxHotelNameLength) }},
+		{"longest address", func(r *CreateHotelRequest) { r.Address = strings.Repeat("a", maxAddressLength) }},
+		{"one star", func(r *CreateHotelRequest) { r.StarRating = 1 }},
+		{"five stars", func(r *CreateHotelRequest) { r.StarRating = 5 }},
+		{"one room type", func(r *CreateHotelRequest) { r.RoomTypes = r.RoomTypes[:1] }},
+		{"most room types", func(r *CreateHotelRequest) { r.RoomTypes = tenRoomTypes }},
+		{"largest room type", func(r *CreateHotelRequest) {
+			r.RoomTypes[0] = RoomTypeRequest{
+				Name:          strings.Repeat("a", maxRoomTypeNameLength),
+				MaxGuests:     maxGuests,
+				TotalRooms:    maxTotalRooms,
+				PricePerNight: 1,
+			}
+		}},
+		{"room type names that differ only in case", func(r *CreateHotelRequest) { r.RoomTypes[1].Name = "deluxe double" }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validCreateHotelRequest()
+			tc.mutate(&request)
+
+			require.NoError(t, request.Validate())
+		})
+	}
+}
+
+func TestCreateHotelRequestValidate_rejectsASingleInvalidField(t *testing.T) {
+	elevenRoomTypes := make([]RoomTypeRequest, maxRoomTypes+1)
+	for i := range elevenRoomTypes {
+		elevenRoomTypes[i] = RoomTypeRequest{Name: fmt.Sprintf("Room %d", i+1), MaxGuests: 2, TotalRooms: 1, PricePerNight: 1}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(r *CreateHotelRequest)
+		field  string
+	}{
+		{"missing name", func(r *CreateHotelRequest) { r.Name = "" }, "name"},
+		{"name too long", func(r *CreateHotelRequest) { r.Name = strings.Repeat("é", maxHotelNameLength+1) }, "name"},
+		{"missing city", func(r *CreateHotelRequest) { r.CityCode = "" }, "city_code"},
+		{"lower case city", func(r *CreateHotelRequest) { r.CityCode = "dps" }, "city_code"},
+		{"city with four letters", func(r *CreateHotelRequest) { r.CityCode = "DPSX" }, "city_code"},
+		{"missing address", func(r *CreateHotelRequest) { r.Address = "" }, "address"},
+		{"address too long", func(r *CreateHotelRequest) { r.Address = strings.Repeat("a", maxAddressLength+1) }, "address"},
+		{"no stars", func(r *CreateHotelRequest) { r.StarRating = 0 }, "star_rating"},
+		{"six stars", func(r *CreateHotelRequest) { r.StarRating = 6 }, "star_rating"},
+		{"no room types", func(r *CreateHotelRequest) { r.RoomTypes = nil }, "room_types"},
+		{"too many room types", func(r *CreateHotelRequest) { r.RoomTypes = elevenRoomTypes }, "room_types"},
+		{"room type without a name", func(r *CreateHotelRequest) { r.RoomTypes[1].Name = "" }, "room_types[1].name"},
+		{"room type name too long", func(r *CreateHotelRequest) { r.RoomTypes[0].Name = strings.Repeat("a", maxRoomTypeNameLength+1) }, "room_types[0].name"},
+		{"duplicate room type name", func(r *CreateHotelRequest) { r.RoomTypes[1].Name = "Deluxe Double" }, "room_types[1].name"},
+		{"room for no guests", func(r *CreateHotelRequest) { r.RoomTypes[0].MaxGuests = 0 }, "room_types[0].max_guests"},
+		{"room for too many guests", func(r *CreateHotelRequest) { r.RoomTypes[0].MaxGuests = maxGuests + 1 }, "room_types[0].max_guests"},
+		{"no rooms", func(r *CreateHotelRequest) { r.RoomTypes[1].TotalRooms = 0 }, "room_types[1].total_rooms"},
+		{"too many rooms", func(r *CreateHotelRequest) { r.RoomTypes[1].TotalRooms = maxTotalRooms + 1 }, "room_types[1].total_rooms"},
+		{"free room", func(r *CreateHotelRequest) { r.RoomTypes[0].PricePerNight = 0 }, "room_types[0].price_per_night"},
+		{"negative price", func(r *CreateHotelRequest) { r.RoomTypes[0].PricePerNight = -1 }, "room_types[0].price_per_night"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validCreateHotelRequest()
+			tc.mutate(&request)
+
+			err := request.Validate()
+
+			require.Equal(t, []string{tc.field}, invalidFields(t, err))
+		})
+	}
+}
+
+func TestCreateHotelRequestValidate_reportsEveryInvalidFieldOfAnEmptyRequest(t *testing.T) {
+	request := CreateHotelRequest{}
+
+	err := request.Validate()
+
+	require.Equal(t, []string{"name", "city_code", "address", "star_rating", "room_types"}, invalidFields(t, err))
+}
+
+func TestCreateHotelRequestValidate_reportsEveryInvalidRoomTypeField(t *testing.T) {
+	request := validCreateHotelRequest()
+	request.RoomTypes = []RoomTypeRequest{{}, {Name: "Twin", MaxGuests: 2, TotalRooms: 1, PricePerNight: 1}, {Name: "Twin"}}
+
+	err := request.Validate()
+
+	require.Equal(t, []string{
+		"room_types[0].name", "room_types[0].max_guests", "room_types[0].total_rooms", "room_types[0].price_per_night",
+		"room_types[2].name", "room_types[2].max_guests", "room_types[2].total_rooms", "room_types[2].price_per_night",
+	}, invalidFields(t, err))
+}
+
+func validSearchHotelsRequest() SearchHotelsRequest {
+	return SearchHotelsRequest{
+		City:     "DPS",
+		CheckIn:  time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC),
+		CheckOut: time.Date(2026, 12, 3, 0, 0, 0, 0, time.UTC),
+		Guests:   defaultGuests,
+		Sort:     sortPriceAsc,
+		Page:     defaultPage,
+		PageSize: defaultPageSize,
+	}
+}
+
+func TestSearchHotelsRequestValidate_acceptsEveryFilterAndTheLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(r *SearchHotelsRequest)
+	}{
+		{"valid request", func(*SearchHotelsRequest) {}},
+		{"every filter", func(r *SearchHotelsRequest) {
+			r.Guests = 3
+			r.MinPrice = ptr(int64(500_000))
+			r.MaxPrice = ptr(int64(2_000_000))
+			r.Sort = sortPriceDesc
+			r.Page = 3
+			r.PageSize = 50
+		}},
+		{"one night", func(r *SearchHotelsRequest) { r.CheckOut = r.CheckIn.AddDate(0, 0, 1) }},
+		{"longest stay", func(r *SearchHotelsRequest) { r.CheckOut = r.CheckIn.AddDate(0, 0, maxNights) }},
+		{"most guests", func(r *SearchHotelsRequest) { r.Guests = maxGuests }},
+		{"same minimum and maximum price", func(r *SearchHotelsRequest) {
+			r.MinPrice = ptr(int64(900_000))
+			r.MaxPrice = ptr(int64(900_000))
+		}},
+		{"largest page and page size", func(r *SearchHotelsRequest) {
+			r.Page = maxPage
+			r.PageSize = maxPageSize
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validSearchHotelsRequest()
+			tc.mutate(&request)
+
+			require.NoError(t, request.Validate())
+		})
+	}
+}
+
+func TestSearchHotelsRequestValidate_rejectsASingleInvalidField(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(r *SearchHotelsRequest)
+		field  string
+	}{
+		{"missing city", func(r *SearchHotelsRequest) { r.City = "" }, "city"},
+		{"lower case city", func(r *SearchHotelsRequest) { r.City = "dps" }, "city"},
+		{"missing check-in", func(r *SearchHotelsRequest) { r.CheckIn = time.Time{} }, "check_in"},
+		{"missing check-out", func(r *SearchHotelsRequest) { r.CheckOut = time.Time{} }, "check_out"},
+		{"check-out on the check-in day", func(r *SearchHotelsRequest) { r.CheckOut = r.CheckIn }, "check_out"},
+		{"check-out before check-in", func(r *SearchHotelsRequest) { r.CheckOut = r.CheckIn.AddDate(0, 0, -1) }, "check_out"},
+		{"stay one night too long", func(r *SearchHotelsRequest) { r.CheckOut = r.CheckIn.AddDate(0, 0, maxNights+1) }, "check_out"},
+		{"no guests", func(r *SearchHotelsRequest) { r.Guests = 0 }, "guests"},
+		{"too many guests", func(r *SearchHotelsRequest) { r.Guests = maxGuests + 1 }, "guests"},
+		{"negative minimum price", func(r *SearchHotelsRequest) { r.MinPrice = ptr(int64(-1)) }, "min_price"},
+		{"negative maximum price", func(r *SearchHotelsRequest) { r.MaxPrice = ptr(int64(-1)) }, "max_price"},
+		{"minimum price above maximum", func(r *SearchHotelsRequest) {
+			r.MinPrice = ptr(int64(900_001))
+			r.MaxPrice = ptr(int64(900_000))
+		}, "max_price"},
+		{"flight sort", func(r *SearchHotelsRequest) { r.Sort = sortDepartureAsc }, "sort"},
+		{"empty sort", func(r *SearchHotelsRequest) { r.Sort = "" }, "sort"},
+		{"page zero", func(r *SearchHotelsRequest) { r.Page = 0 }, "page"},
+		{"page size above the limit", func(r *SearchHotelsRequest) { r.PageSize = maxPageSize + 1 }, "page_size"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := validSearchHotelsRequest()
+			tc.mutate(&request)
+
+			err := request.Validate()
+
+			require.Equal(t, []string{tc.field}, invalidFields(t, err))
+		})
+	}
+}
+
+func TestSearchHotelsRequestValidate_reportsEveryInvalidFieldTogether(t *testing.T) {
+	request := SearchHotelsRequest{
+		City:     "dps",
+		Guests:   11,
+		MinPrice: ptr(int64(2)),
+		MaxPrice: ptr(int64(1)),
+		Sort:     "cheapest",
+	}
+
+	err := request.Validate()
+
+	require.Equal(t, []string{
+		"city", "check_in", "check_out", "guests", "max_price", "sort", "page", "page_size",
+	}, invalidFields(t, err))
+}
+
+func TestSearchHotelsRequestNights_countsTheNightsOfTheStay(t *testing.T) {
+	request := validSearchHotelsRequest()
+
+	require.Equal(t, int64(2), request.nights())
 }

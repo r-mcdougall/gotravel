@@ -1,8 +1,10 @@
 package catalog
 
 import (
+	"fmt"
 	"regexp"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -16,6 +18,20 @@ const (
 )
 
 const (
+	maxHotelNameLength    = 100
+	maxAddressLength      = 200
+	maxRoomTypeNameLength = 100
+	maxRoomTypes          = 10
+
+	maxStarRating int32 = 5
+	maxTotalRooms int32 = 1000
+
+	defaultGuests int32 = 1
+	maxGuests     int32 = 10
+	maxNights           = 14
+)
+
+const (
 	sortDepartureAsc  = "departure_asc"
 	sortDepartureDesc = "departure_desc"
 	sortPriceAsc      = "price_asc"
@@ -26,6 +42,7 @@ var (
 	flightNumberPattern = regexp.MustCompile(`^[A-Z0-9]{2}[0-9]{1,4}$`)
 	airlineCodePattern  = regexp.MustCompile(`^[A-Z0-9]{2}$`)
 	airportCodePattern  = regexp.MustCompile(`^[A-Z]{3}$`)
+	cityCodePattern     = regexp.MustCompile(`^[A-Z]{3}$`)
 	uuidPattern         = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
 
@@ -33,6 +50,7 @@ const (
 	flightNumberMessage = "must be an airline code followed by 1 to 4 digits, in upper case"
 	airlineCodeMessage  = "must be a 2-character airline code in upper case"
 	airportCodeMessage  = "must be a 3-letter airport code in upper case"
+	cityCodeMessage     = "must be a 3-letter city code in upper case"
 	timeOfDayMessage    = "must be a time between 00:00 and 23:59"
 )
 
@@ -49,6 +67,10 @@ func validSort(sort string) bool {
 	}
 }
 
+func validHotelSort(sort string) bool {
+	return sort == sortPriceAsc || sort == sortPriceDesc
+}
+
 // validTimeOfDay reports whether d is an offset from local midnight that falls inside the same day.
 func validTimeOfDay(d time.Duration) bool {
 	return d >= 0 && d < 24*time.Hour
@@ -57,4 +79,13 @@ func validTimeOfDay(d time.Duration) bool {
 func checkPaging(v *ValidationError, page, pageSize int32) {
 	v.check(page >= 1 && page <= maxPage, "page", "must be between 1 and 1000000")
 	v.check(pageSize >= 1 && pageSize <= maxPageSize, "page_size", "must be between 1 and 100")
+}
+
+func checkText(v *ValidationError, field, value string, maxLength int) {
+	switch {
+	case value == "":
+		v.check(false, field, "is required")
+	case utf8.RuneCountInString(value) > maxLength:
+		v.check(false, field, fmt.Sprintf("must be at most %d characters", maxLength))
+	}
 }
