@@ -108,6 +108,7 @@ func execute(ctx context.Context, args []string, getenv func(string) string, now
 	if err != nil {
 		return fmt.Errorf("plan flights: %w", err)
 	}
+	hotels := planHotels()
 
 	log := slog.New(slog.NewTextHandler(out, nil))
 	log.Info("seeding the catalog",
@@ -115,6 +116,7 @@ func execute(ctx context.Context, args []string, getenv func(string) string, now
 		slog.String("from", from.Format(time.DateOnly)),
 		slog.Int("days", cfg.days),
 		slog.Int("flights", len(flights)),
+		slog.Int("hotels", len(hotels)),
 		slog.Int("workers", cfg.workers),
 	)
 
@@ -126,7 +128,7 @@ func execute(ctx context.Context, args []string, getenv func(string) string, now
 	}
 
 	result := run(ctx, api, flights, cfg.workers, log)
-	log.Info("seeding finished",
+	log.Info("flights seeded",
 		slog.Int("created", result.created),
 		slog.Int("existing", result.existing),
 		slog.Int("failed", result.failed),
@@ -137,8 +139,22 @@ func execute(ctx context.Context, args []string, getenv func(string) string, now
 		return fmt.Errorf("stopped after %d failures; %d of %d flights were tried", result.failed, result.processed(), len(flights))
 	case ctx.Err() != nil:
 		return fmt.Errorf("interrupted after %d of %d flights", result.processed(), len(flights))
+	}
+
+	hotelResult := seedHotels(ctx, api, hotels, log)
+	log.Info("hotels seeded",
+		slog.Int("created", hotelResult.created),
+		slog.Int("existing", hotelResult.existing),
+		slog.Int("failed", hotelResult.failed),
+	)
+
+	switch {
 	case result.failed > 0:
 		return fmt.Errorf("%d of %d flights failed", result.failed, len(flights))
+	case ctx.Err() != nil:
+		return fmt.Errorf("interrupted after %d of %d hotels", hotelResult.processed(), len(hotels))
+	case hotelResult.failed > 0:
+		return fmt.Errorf("%d of %d hotels failed", hotelResult.failed, len(hotels))
 	}
 	return nil
 }

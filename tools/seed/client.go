@@ -14,6 +14,7 @@ import (
 const (
 	loginPath        = "/api/v1/auth/login"
 	createFlightPath = "/api/v1/admin/flights"
+	createHotelPath  = "/api/v1/admin/hotels"
 
 	// maxBodyBytes caps how much of a response is read, every body the API sends is far smaller.
 	maxBodyBytes = 1 << 20
@@ -78,6 +79,23 @@ func (c *client) createFlight(ctx context.Context, spec flightSpec) (outcome, er
 	}
 }
 
+// createHotel creates one hotel with its room types. A hotel that already exists is not an error, so the seed can run again.
+func (c *client) createHotel(ctx context.Context, spec hotelSpec) (outcome, error) {
+	status, body, err := c.post(ctx, createHotelPath, spec)
+	if err != nil {
+		return 0, fmt.Errorf("create hotel %s: %w", hotelLabel(spec), err)
+	}
+
+	switch {
+	case status == http.StatusCreated:
+		return outcomeCreated, nil
+	case status == http.StatusConflict && parseAPIError(body).Code == "HOTEL_EXISTS":
+		return outcomeExisting, nil
+	default:
+		return 0, fmt.Errorf("create hotel %s: %s", hotelLabel(spec), describe(status, body))
+	}
+}
+
 // post sends a JSON body and returns the status and the (capped) response body.
 func (c *client) post(ctx context.Context, path string, payload any) (int, []byte, error) {
 	data, err := json.Marshal(payload)
@@ -109,6 +127,10 @@ func (c *client) post(ctx context.Context, path string, payload any) (int, []byt
 
 func flightLabel(spec flightSpec) string {
 	return fmt.Sprintf("%s departing %s", spec.FlightNumber, spec.DepartureAt.Format(time.RFC3339))
+}
+
+func hotelLabel(spec hotelSpec) string {
+	return fmt.Sprintf("%q in %s", spec.Name, spec.CityCode)
 }
 
 type apiError struct {
