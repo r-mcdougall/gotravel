@@ -228,8 +228,8 @@ func TestRun_appliesMigrationsOnStart(t *testing.T) {
 	tables := queryCount(t,
 		`SELECT count(*) FROM information_schema.tables
 		 WHERE table_schema = 'public'
-		   AND table_name IN ('airlines', 'airports', 'flights', 'outbox')`)
-	require.Equal(t, 4, tables)
+		   AND table_name IN ('airlines', 'airports', 'flights', 'outbox', 'cities', 'hotels', 'room_types')`)
+	require.Equal(t, 7, tables)
 
 	require.NoError(t, stop())
 }
@@ -239,6 +239,7 @@ func TestRun_loadsReferenceDataOnStart(t *testing.T) {
 
 	require.Equal(t, 8, queryCount(t, `SELECT count(*) FROM airlines`))
 	require.Equal(t, 11, queryCount(t, `SELECT count(*) FROM airports`))
+	require.Equal(t, 11, queryCount(t, `SELECT count(*) FROM cities`))
 
 	require.NoError(t, stop())
 }
@@ -407,6 +408,7 @@ func TestRun_adminEndpointsRequireAnAdminToken(t *testing.T) {
 		{http.MethodPost, "/api/v1/admin/flights"},
 		{http.MethodGet, "/api/v1/admin/flights/" + id},
 		{http.MethodPatch, "/api/v1/admin/flights/" + id},
+		{http.MethodPost, "/api/v1/admin/hotels"},
 	}
 
 	for _, route := range routes {
@@ -994,6 +996,213 @@ func TestRun_refusesToLowerCapacityWhileBookingIsDown(t *testing.T) {
 
 	code, body = send(t, http.MethodPatch, flight, admin, `{"capacity": 200, "price": 900000}`)
 	require.Equal(t, http.StatusOK, code, body, "raising the capacity or changing the price does not need booking")
+
+	require.NoError(t, stop())
+}
+
+func truncateHotels(t *testing.T) {
+	t.Helper()
+	conn, err := pgx.Connect(t.Context(), os.Getenv("DATABASE_URL"))
+	require.NoError(t, err)
+	defer func() { _ = conn.Close(t.Context()) }()
+
+	_, err = conn.Exec(t.Context(), "TRUNCATE room_types, hotels, outbox")
+	require.NoError(t, err)
+}
+
+const createHotelBody = `{
+	"name": "Seminyak Garden Hotel", "city_code": "DPS",
+	"address": "Jl. Raya Seminyak 12, Badung", "star_rating": 4,
+	"room_types": [
+		{"name": "Deluxe Double", "max_guests": 2, "total_rooms": 20, "price_per_night": 850000},
+		{"name": "Family Suite", "max_guests": 4, "total_rooms": 5, "price_per_night": 1600000}
+	]
+}`
+
+type hotelRoom struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	PricePerNight int64  `json:"price_per_night"`
+	TotalPrice    int64  `json:"total_price"`
+}
+
+type hotel struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	City struct {
+		Code string `json:"code"`
+		Name string `json:"name"`
+	} `json:"city"`
+	LowestPricePerNight int64       `json:"lowest_price_per_night"`
+	RoomTypes           []hotelRoom `json:"room_types"`
+}
+
+func createHotel(t *testing.T, addr, admin string) hotel {
+	t.Helper()
+	code, body := send(t, http.MethodPost, "http://"+addr+"/api/v1/admin/hotels", admin, createHotelBody)
+	require.Equal(t, http.StatusCreated, code, body)
+
+	var created hotel
+	require.NoError(t, json.Unmarshal([]byte(body), &created))
+	return created
+}
+
+func roomNames(h hotel) []string {
+	names := make([]string, len(h.RoomTypes))
+	for i, room := range h.RoomTypes {
+		names[i] = room.Name
+	}
+	return names
+}
+
+func TestRun_adminCreatesAHotelAndAnyoneCanSearchIt(t *testing.T) {
+	truncateHotels(t)
+	addr, stop := startService(t)
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	adminHotels := "http://" + addr + "/api/v1/admin/hotels"
+
+	created := createHotel(t, addr, admin)
+	require.NotEmpty(t, created.ID)
+	require.Equal(t, "Denpasar", created.City.Name, "the city comes from the migrated reference data")
+	require.Equal(t, []string{"Deluxe Double", "Family Suite"}, roomNames(created))
+	require.NotEmpty(t, created.RoomTypes[0].ID)
+
+	code, body := send(t, http.MethodPost, adminHotels, admin, createHotelBody)
+	require.Equal(t, http.StatusConflict, code, body)
+	require.Equal(t, "HOTEL_EXISTS", errorCode(t, body))
+
+	code, body = send(t, http.MethodPost, adminHotels, admin, strings.Replace(createHotelBody, `"DPS"`, `"ZZZ"`, 1))
+	require.Equal(t, http.StatusBadRequest, code, body)
+	require.Equal(t, "VALIDATION_ERROR", errorCode(t, body))
+	require.Contains(t, body, `"field":"city_code"`)
+
+	require.Equal(t, 2, queryCount(t, `SELECT count(*) FROM outbox WHERE event_type = 'room_type.created'`), "one event per room type")
+
+	// Always a week ahead in UTC, so the check-in is never in the past.
+	checkIn := time.Now().UTC().AddDate(0, 0, 7)
+	stay := fmt.Sprintf("check_in=%s&check_out=%s", checkIn.Format(time.DateOnly), checkIn.AddDate(0, 0, 2).Format(time.DateOnly))
+	search := func(query string) (int, string) {
+		t.Helper()
+		return send(t, http.MethodGet, "http://"+addr+"/api/v1/hotels?"+query, "", "")
+	}
+	found := func(query string) []hotel {
+		t.Helper()
+		code, body := search(query)
+		require.Equal(t, http.StatusOK, code, body)
+		var list struct {
+			Data []hotel `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(body), &list))
+		return list.Data
+	}
+
+	t.Run("finds the hotel without a token, priced for the whole stay", func(t *testing.T) {
+		code, body := search("city=DPS&" + stay)
+		require.Equal(t, http.StatusOK, code, body)
+		require.NotContains(t, body, `"total_rooms"`, "the public view hides the inventory")
+
+		hotels := found("city=DPS&" + stay)
+		require.Len(t, hotels, 1)
+		require.Equal(t, created.ID, hotels[0].ID)
+		require.Equal(t, int64(850_000), hotels[0].LowestPricePerNight)
+		require.Equal(t, int64(1_700_000), hotels[0].RoomTypes[0].TotalPrice)
+	})
+	t.Run("leaves out room types too small for the guests", func(t *testing.T) {
+		hotels := found("city=DPS&guests=3&" + stay)
+
+		require.Len(t, hotels, 1)
+		require.Equal(t, []string{"Family Suite"}, roomNames(hotels[0]))
+	})
+	t.Run("returns an empty list when no room fits or the city has no hotels", func(t *testing.T) {
+		for _, query := range []string{"city=DPS&guests=5&" + stay, "city=JKT&" + stay, "city=ZZZ&" + stay} {
+			code, body := search(query)
+			require.Equal(t, http.StatusOK, code, body)
+			require.Contains(t, body, `"data":[]`, query)
+		}
+	})
+	t.Run("rejects a check-in in the past", func(t *testing.T) {
+		yesterday := time.Now().UTC().AddDate(0, 0, -1)
+		code, body := search(fmt.Sprintf("city=DPS&check_in=%s&check_out=%s",
+			yesterday.Format(time.DateOnly), yesterday.AddDate(0, 0, 2).Format(time.DateOnly)))
+
+		require.Equal(t, http.StatusBadRequest, code, body)
+		require.Contains(t, body, `"field":"check_in"`)
+	})
+	t.Run("rejects a malformed search", func(t *testing.T) {
+		code, body := search("city=DPS")
+
+		require.Equal(t, http.StatusBadRequest, code, body)
+		require.Equal(t, "VALIDATION_ERROR", errorCode(t, body))
+	})
+
+	require.NoError(t, stop())
+}
+
+func TestRun_publishesRoomTypeCreatedToRabbitMQ(t *testing.T) {
+	truncateHotels(t)
+
+	// Messages published before the queue exists are dropped, so wait until the consumer has declared it.
+	started := &logSignal{match: "rabbitmq consumer started", ready: make(chan struct{})}
+	received := make(chan messaging.Delivery, 10)
+	ctx, cancel := context.WithCancel(t.Context())
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		messaging.Consume(ctx, rabbitmqURL, messaging.Subscription{
+			Exchange: "catalog.events", RoutingKey: "room_type.created", Queue: "test.catalog-room-type-created",
+		}, func(_ context.Context, d messaging.Delivery) error {
+			received <- d
+			return nil
+		}, slog.New(slog.NewTextHandler(started, nil)))
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-consumerDone
+	})
+	select {
+	case <-started.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("test consumer did not start")
+	}
+
+	addr, stop := startService(t)
+	admin := signToken(t, testSigningKey, authn.RoleAdmin, time.Now().Add(time.Hour))
+	created := createHotel(t, addr, admin)
+
+	type roomTypeCreated struct {
+		Type string `json:"type"`
+		Data struct {
+			RoomTypeID    string `json:"room_type_id"`
+			HotelID       string `json:"hotel_id"`
+			HotelName     string `json:"hotel_name"`
+			CityCode      string `json:"city_code"`
+			TotalRooms    int32  `json:"total_rooms"`
+			PricePerNight int64  `json:"price_per_night"`
+		} `json:"data"`
+	}
+	rooms := map[string]roomTypeCreated{}
+	for range created.RoomTypes {
+		select {
+		case delivery := <-received:
+			require.Equal(t, "room_type.created", delivery.Type)
+			var event roomTypeCreated
+			require.NoError(t, json.Unmarshal(delivery.Body, &event))
+			rooms[event.Data.RoomTypeID] = event
+		case <-time.After(10 * time.Second):
+			t.Fatal("not every room_type.created event reached RabbitMQ")
+		}
+	}
+
+	for _, room := range created.RoomTypes {
+		event, ok := rooms[room.ID]
+		require.True(t, ok, "no event for room type %s", room.ID)
+		require.Equal(t, "room_type.created", event.Type)
+		require.Equal(t, created.ID, event.Data.HotelID)
+		require.Equal(t, "Seminyak Garden Hotel", event.Data.HotelName)
+		require.Equal(t, "DPS", event.Data.CityCode)
+		require.Equal(t, room.PricePerNight, event.Data.PricePerNight)
+	}
+	require.Equal(t, int32(20), rooms[created.RoomTypes[0].ID].Data.TotalRooms)
 
 	require.NoError(t, stop())
 }

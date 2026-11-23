@@ -23,6 +23,8 @@ type Service interface {
 	ListFlights(ctx context.Context, request ListFlightsRequest) (AdminFlightListResponse, error)
 	SearchFlights(ctx context.Context, request SearchFlightsRequest) (FlightListResponse, error)
 	GetFlightDetail(ctx context.Context, id string) (FlightResponse, error)
+	CreateHotel(ctx context.Context, request CreateHotelRequest) (AdminHotelResponse, error)
+	SearchHotels(ctx context.Context, request SearchHotelsRequest) (HotelListResponse, error)
 }
 
 type Handler struct {
@@ -42,6 +44,7 @@ func NewHandler(service Service, log *slog.Logger, verifier *authn.Verifier) *Ha
 func (h *Handler) Routes(r chi.Router) {
 	r.Get("/api/v1/flights", h.SearchFlights)
 	r.Get("/api/v1/flights/{id}", h.GetFlightDetail)
+	r.Get("/api/v1/hotels", h.SearchHotels)
 
 	r.Group(func(r chi.Router) {
 		r.Use(authn.Authenticate(h.verifier))
@@ -51,6 +54,7 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Post("/api/v1/admin/flights", h.CreateFlight)
 		r.Get("/api/v1/admin/flights/{id}", h.GetFlight)
 		r.Patch("/api/v1/admin/flights/{id}", h.UpdateFlight)
+		r.Post("/api/v1/admin/hotels", h.CreateHotel)
 	})
 }
 
@@ -138,6 +142,38 @@ func (h *Handler) UpdateFlight(w http.ResponseWriter, r *http.Request) {
 	httpserver.WriteJSON(w, http.StatusOK, response)
 }
 
+func (h *Handler) CreateHotel(w http.ResponseWriter, r *http.Request) {
+	var request CreateHotelRequest
+	if err := httpserver.DecodeJSON(w, r, &request); err != nil {
+		invalidBody(w)
+		return
+	}
+
+	response, err := h.service.CreateHotel(r.Context(), request)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusCreated, response)
+}
+
+func (h *Handler) SearchHotels(w http.ResponseWriter, r *http.Request) {
+	request, err := parseSearchHotelsQuery(r.URL.Query())
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	response, err := h.service.SearchHotels(r.Context(), request)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusOK, response)
+}
+
 func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var validationErr *ValidationError
 
@@ -148,6 +184,8 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		httpserver.WriteError(w, http.StatusNotFound, "NOT_FOUND", "flight not found")
 	case errors.Is(err, ErrFlightExists):
 		httpserver.WriteError(w, http.StatusConflict, "FLIGHT_EXISTS", "flight already exists for this departure time")
+	case errors.Is(err, ErrHotelExists):
+		httpserver.WriteError(w, http.StatusConflict, "HOTEL_EXISTS", "hotel already exists in this city")
 	case errors.Is(err, ErrCapacityBelowSold):
 		httpserver.WriteError(w, http.StatusConflict, "CAPACITY_BELOW_SOLD", "capacity is lower than the seats already held or sold")
 	case errors.Is(err, ErrBookingUnavailable):
@@ -244,6 +282,53 @@ func parseSearchFlightsQuery(query url.Values) (SearchFlightsRequest, error) {
 		if errors.As(err, &validationErr) {
 			for _, detail := range validationErr.Details {
 				if detail.Field == "date" && rawDate != "" {
+					continue // a malformed date is already reported above
+				}
+				invalid.Details = append(invalid.Details, detail)
+			}
+		}
+	}
+
+	return request, invalid.err()
+}
+
+// parseSearchHotelsQuery turns the query string into a hotel search request,
+// applying the defaults for guests, sort and paging. Every invalid parameter
+// is reported together.
+func parseSearchHotelsQuery(query url.Values) (SearchHotelsRequest, error) {
+	request := SearchHotelsRequest{
+		City:     query.Get("city"),
+		Guests:   int32Param(query.Get("guests"), defaultGuests, maxGuests),
+		Sort:     query.Get("sort"),
+		Page:     int32Param(query.Get("page"), defaultPage, maxPage),
+		PageSize: int32Param(query.Get("page_size"), defaultPageSize, maxPageSize),
+	}
+	if request.Sort == "" {
+		request.Sort = sortPriceAsc
+	}
+
+	var invalid ValidationError
+	malformed := make(map[string]bool)
+	date := func(name string) time.Time {
+		raw := query.Get(name)
+		if raw == "" {
+			return time.Time{}
+		}
+		parsed, err := time.Parse(time.DateOnly, raw)
+		invalid.check(err == nil, name, "must be a date in YYYY-MM-DD format")
+		malformed[name] = err != nil
+		return parsed
+	}
+	request.CheckIn = date("check_in")
+	request.CheckOut = date("check_out")
+	request.MinPrice = priceParam(&invalid, query, "min_price")
+	request.MaxPrice = priceParam(&invalid, query, "max_price")
+
+	if err := request.Validate(); err != nil {
+		var validationErr *ValidationError
+		if errors.As(err, &validationErr) {
+			for _, detail := range validationErr.Details {
+				if malformed[detail.Field] {
 					continue // a malformed date is already reported above
 				}
 				invalid.Details = append(invalid.Details, detail)

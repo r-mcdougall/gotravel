@@ -37,6 +37,8 @@ type fakeService struct {
 	listFlights     func(ctx context.Context, request ListFlightsRequest) (AdminFlightListResponse, error)
 	searchFlights   func(ctx context.Context, request SearchFlightsRequest) (FlightListResponse, error)
 	getFlightDetail func(ctx context.Context, id string) (FlightResponse, error)
+	createHotel     func(ctx context.Context, request CreateHotelRequest) (AdminHotelResponse, error)
+	searchHotels    func(ctx context.Context, request SearchHotelsRequest) (HotelListResponse, error)
 }
 
 func (f *fakeService) CreateFlight(ctx context.Context, request CreateFlightRequest) (AdminFlightResponse, error) {
@@ -79,6 +81,20 @@ func (f *fakeService) GetFlightDetail(ctx context.Context, id string) (FlightRes
 		f.t.Fatal("unexpected call to GetFlightDetail")
 	}
 	return f.getFlightDetail(ctx, id)
+}
+
+func (f *fakeService) CreateHotel(ctx context.Context, request CreateHotelRequest) (AdminHotelResponse, error) {
+	if f.createHotel == nil {
+		f.t.Fatal("unexpected call to CreateHotel")
+	}
+	return f.createHotel(ctx, request)
+}
+
+func (f *fakeService) SearchHotels(ctx context.Context, request SearchHotelsRequest) (HotelListResponse, error) {
+	if f.searchHotels == nil {
+		f.t.Fatal("unexpected call to SearchHotels")
+	}
+	return f.searchHotels(ctx, request)
 }
 
 func validationError(field, message string) *ValidationError {
@@ -595,4 +611,234 @@ func TestRoutes_servesSearchAndDetailWithoutAToken(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, rec.Code, target)
 	}
+}
+
+const createHotelBody = `{
+	"name": "Seminyak Garden Hotel",
+	"city_code": "DPS",
+	"address": "Jl. Raya Seminyak 12, Badung",
+	"star_rating": 4,
+	"room_types": [
+		{"name": "Deluxe Double", "max_guests": 2, "total_rooms": 20, "price_per_night": 850000},
+		{"name": "Family Suite", "max_guests": 4, "total_rooms": 5, "price_per_night": 1600000}
+	]
+}`
+
+func sampleAdminHotel() AdminHotelResponse {
+	return AdminHotelResponse{
+		ID:         sampleHotelID,
+		Name:       "Seminyak Garden Hotel",
+		City:       CityResponse{Code: "DPS", Name: "Denpasar"},
+		Address:    "Jl. Raya Seminyak 12, Badung",
+		StarRating: 4,
+		RoomTypes: []AdminRoomTypeResponse{
+			{ID: sampleRoomType().ID, Name: "Deluxe Double", MaxGuests: 2, TotalRooms: 20, PricePerNight: 850_000},
+		},
+		CreatedAt: sampleHotel().CreatedAt,
+	}
+}
+
+func TestCreateHotel_returns201WithTheCreatedHotel(t *testing.T) {
+	var got CreateHotelRequest
+	svc := &fakeService{t: t, createHotel: func(_ context.Context, request CreateHotelRequest) (AdminHotelResponse, error) {
+		got = request
+		return sampleAdminHotel(), nil
+	}}
+
+	rec := callHandler(t, newTestHandler(svc).CreateHotel, http.MethodPost, "/api/v1/admin/hotels", createHotelBody, "")
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	require.JSONEq(t, toJSON(t, sampleAdminHotel()), rec.Body.String())
+	require.Equal(t, validCreateHotelRequest(), got)
+}
+
+func TestCreateHotel_rejectsABodyItCannotDecodeWithoutCallingTheService(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"malformed json", `{"name":`},
+		{"unknown field", `{"name":"Seminyak Garden Hotel","facilities":["pool"]}`},
+		{"unknown room type field", `{"room_types":[{"name":"Twin","available_rooms":3}]}`},
+		{"wrong type", `{"star_rating":"four"}`},
+		{"room types that are not a list", `{"room_types":{"name":"Twin"}}`},
+		{"empty body", ``},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := callHandler(t, newTestHandler(&fakeService{t: t}).CreateHotel, http.MethodPost, "/api/v1/admin/hotels", tc.body, "")
+
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			body := decodeBody[errorBody](t, rec)
+			require.Equal(t, "VALIDATION_ERROR", body.Error.Code)
+			require.Equal(t, "invalid request body", body.Error.Message)
+		})
+	}
+}
+
+func TestCreateHotel_mapsServiceErrorsToHTTPErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+		wantFields []string
+	}{
+		{"validation error", validationError("room_types[1].max_guests", "must be between 1 and 10"),
+			http.StatusBadRequest, "VALIDATION_ERROR", []string{"room_types[1].max_guests"}},
+		{"duplicate hotel", ErrHotelExists, http.StatusConflict, "HOTEL_EXISTS", nil},
+		{"wrapped duplicate hotel", fmt.Errorf("create hotel: %w", ErrHotelExists), http.StatusConflict, "HOTEL_EXISTS", nil},
+		{"unexpected error", errBoom, http.StatusInternalServerError, "INTERNAL_ERROR", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeService{t: t, createHotel: func(context.Context, CreateHotelRequest) (AdminHotelResponse, error) {
+				return AdminHotelResponse{}, tc.err
+			}}
+
+			rec := callHandler(t, newTestHandler(svc).CreateHotel, http.MethodPost, "/api/v1/admin/hotels", createHotelBody, "")
+
+			require.Equal(t, tc.wantStatus, rec.Code)
+			body := decodeBody[errorBody](t, rec)
+			require.Equal(t, tc.wantCode, body.Error.Code)
+			require.Equal(t, tc.wantFields, body.fields())
+		})
+	}
+}
+
+const (
+	validHotelSearchQuery = "city=DPS&check_in=2026-12-01&check_out=2026-12-03"
+	hotelSearchTarget     = "/api/v1/hotels?" + validHotelSearchQuery
+)
+
+func sampleHotelResponse() HotelResponse {
+	return HotelResponse{
+		ID:                  sampleHotelID,
+		Name:                "Seminyak Garden Hotel",
+		City:                CityResponse{Code: "DPS", Name: "Denpasar"},
+		Address:             "Jl. Raya Seminyak 12, Badung",
+		StarRating:          4,
+		LowestPricePerNight: 850_000,
+		RoomTypes: []RoomTypeResponse{
+			{ID: sampleRoomType().ID, Name: "Deluxe Double", MaxGuests: 2, PricePerNight: 850_000, TotalPrice: 1_700_000},
+		},
+	}
+}
+
+func TestSearchHotels_appliesTheDefaultsWhenOnlyTheRequiredParametersAreSent(t *testing.T) {
+	var got SearchHotelsRequest
+	svc := &fakeService{t: t, searchHotels: func(_ context.Context, request SearchHotelsRequest) (HotelListResponse, error) {
+		got = request
+		return HotelListResponse{Data: []HotelResponse{}, Meta: PageMeta{Page: 1, PageSize: 20}}, nil
+	}}
+
+	rec := callHandler(t, newTestHandler(svc).SearchHotels, http.MethodGet, hotelSearchTarget, "", "")
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, validSearchHotelsRequest(), got)
+	require.JSONEq(t, `{"data": [], "meta": {"page": 1, "page_size": 20, "total": 0}}`, rec.Body.String())
+}
+
+func TestSearchHotels_passesEveryParameterToTheService(t *testing.T) {
+	var got SearchHotelsRequest
+	svc := &fakeService{t: t, searchHotels: func(_ context.Context, request SearchHotelsRequest) (HotelListResponse, error) {
+		got = request
+		return HotelListResponse{Data: []HotelResponse{sampleHotelResponse()}, Meta: PageMeta{Page: 2, PageSize: 5, Total: 6}}, nil
+	}}
+	target := hotelSearchTarget + "&guests=3&min_price=500000&max_price=1500000&sort=price_desc&page=2&page_size=5"
+
+	rec := callHandler(t, newTestHandler(svc).SearchHotels, http.MethodGet, target, "", "")
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	want := validSearchHotelsRequest()
+	want.Guests = 3
+	want.MinPrice = ptr(int64(500_000))
+	want.MaxPrice = ptr(int64(1_500_000))
+	want.Sort = sortPriceDesc
+	want.Page = 2
+	want.PageSize = 5
+	require.Equal(t, want, got)
+	require.JSONEq(t, toJSON(t, HotelListResponse{
+		Data: []HotelResponse{sampleHotelResponse()},
+		Meta: PageMeta{Page: 2, PageSize: 5, Total: 6},
+	}), rec.Body.String())
+}
+
+func TestSearchHotels_rejectsInvalidQueryParametersWithoutCallingTheService(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		wantFields []string
+	}{
+		{"nothing sent", "", []string{"city", "check_in", "check_out"}},
+		{"check-out is missing", "city=DPS&check_in=2026-12-01", []string{"check_out"}},
+		{"check-in in another format", "city=DPS&check_in=01-12-2026&check_out=2026-12-03", []string{"check_in"}},
+		{"check-out that does not exist", "city=DPS&check_in=2026-02-27&check_out=2026-02-30", []string{"check_out"}},
+		{"check-out on the check-in day", "city=DPS&check_in=2026-12-01&check_out=2026-12-01", []string{"check_out"}},
+		{"stay of fifteen nights", "city=DPS&check_in=2026-12-01&check_out=2026-12-16", []string{"check_out"}},
+		{"lower case city", "city=dps&check_in=2026-12-01&check_out=2026-12-03", []string{"city"}},
+		{"guests is not a number", validHotelSearchQuery + "&guests=two", []string{"guests"}},
+		{"guests is zero", validHotelSearchQuery + "&guests=0", []string{"guests"}},
+		{"guests is above the maximum", validHotelSearchQuery + "&guests=11", []string{"guests"}},
+		{"min price is not a number", validHotelSearchQuery + "&min_price=cheap", []string{"min_price"}},
+		{"max price is below min price", validHotelSearchQuery + "&min_price=900000&max_price=100000", []string{"max_price"}},
+		{"flight sort", validHotelSearchQuery + "&sort=departure_asc", []string{"sort"}},
+		{"page size is above the maximum", validHotelSearchQuery + "&page_size=101", []string{"page_size"}},
+		{"every problem is reported together",
+			"city=dps&check_in=soon&check_out=later&guests=11&min_price=x&sort=none&page=0",
+			[]string{"check_in", "check_out", "min_price", "city", "guests", "sort", "page"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := callHandler(t, newTestHandler(&fakeService{t: t}).SearchHotels, http.MethodGet, "/api/v1/hotels?"+tc.query, "", "")
+
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			body := decodeBody[errorBody](t, rec)
+			require.Equal(t, "VALIDATION_ERROR", body.Error.Code)
+			require.Equal(t, tc.wantFields, body.fields())
+		})
+	}
+}
+
+func TestSearchHotels_mapsServiceErrorsToHTTPErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{"check-in in the past", validationError("check_in", "must not be in the past"), http.StatusBadRequest, "VALIDATION_ERROR"},
+		{"unexpected error", errBoom, http.StatusInternalServerError, "INTERNAL_ERROR"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeService{t: t, searchHotels: func(context.Context, SearchHotelsRequest) (HotelListResponse, error) {
+				return HotelListResponse{}, tc.err
+			}}
+
+			rec := callHandler(t, newTestHandler(svc).SearchHotels, http.MethodGet, hotelSearchTarget, "", "")
+
+			require.Equal(t, tc.wantStatus, rec.Code)
+			require.Equal(t, tc.wantCode, decodeBody[errorBody](t, rec).Error.Code)
+		})
+	}
+}
+
+func TestRoutes_servesHotelSearchWithoutAToken(t *testing.T) {
+	svc := &fakeService{t: t, searchHotels: func(context.Context, SearchHotelsRequest) (HotelListResponse, error) {
+		return HotelListResponse{Data: []HotelResponse{}}, nil
+	}}
+	router := chi.NewRouter()
+	newTestHandler(svc).Routes(router)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, hotelSearchTarget, http.NoBody)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }

@@ -38,23 +38,6 @@ func sampleRoomType() store.RoomType {
 	}
 }
 
-// newTestHotelService returns the concrete service, whose hotel methods are not on the Service interface yet.
-func newTestHotelService(t *testing.T, db *fakeStore) *service {
-	t.Helper()
-	return newTestHotelServiceAt(t, db, time.Now())
-}
-
-// newTestHotelServiceAt pins the clock, so tests decide which check-in dates are in the past.
-func newTestHotelServiceAt(t *testing.T, db *fakeStore, now time.Time) *service {
-	t.Helper()
-	db.t = t
-
-	reference, err := LoadReference(t.Context(), sampleReferenceQueries(t))
-	require.NoError(t, err)
-
-	return newService(db, reference, nil, &fakeSeats{t: t}, func() time.Time { return now })
-}
-
 // hotelDB stores what it is given the way PostgreSQL would and logs every call in order.
 func hotelDB(calls *[]string, hotel *store.CreateHotelParams, rooms *[]store.CreateRoomTypeParams, events *[]store.InsertOutboxEventParams) *fakeStore {
 	return &fakeStore{
@@ -101,7 +84,7 @@ func TestServiceCreateHotel_storesTheHotelThenEachRoomTypeWithItsEvent(t *testin
 		rooms  []store.CreateRoomTypeParams
 		events []store.InsertOutboxEventParams
 	)
-	svc := newTestHotelService(t, hotelDB(&calls, &hotel, &rooms, &events))
+	svc := newTestService(t, hotelDB(&calls, &hotel, &rooms, &events))
 	request := validCreateHotelRequest()
 	request.Name = "  Seminyak Garden Hotel "
 	request.RoomTypes[0].Name = " Deluxe Double"
@@ -139,7 +122,7 @@ func TestServiceCreateHotel_storesTheHotelThenEachRoomTypeWithItsEvent(t *testin
 }
 
 func TestServiceCreateHotel_rejectsAnInvalidRequestWithoutTouchingTheStore(t *testing.T) {
-	svc := newTestHotelService(t, &fakeStore{})
+	svc := newTestService(t, &fakeStore{})
 
 	_, err := svc.CreateHotel(t.Context(), CreateHotelRequest{})
 
@@ -147,7 +130,7 @@ func TestServiceCreateHotel_rejectsAnInvalidRequestWithoutTouchingTheStore(t *te
 }
 
 func TestServiceCreateHotel_rejectsTextThatIsOnlyWhitespace(t *testing.T) {
-	svc := newTestHotelService(t, &fakeStore{})
+	svc := newTestService(t, &fakeStore{})
 	request := validCreateHotelRequest()
 	request.Name = "   "
 	request.RoomTypes[1].Name = "\t"
@@ -158,7 +141,7 @@ func TestServiceCreateHotel_rejectsTextThatIsOnlyWhitespace(t *testing.T) {
 }
 
 func TestServiceCreateHotel_rejectsAnUnknownCityWithoutTouchingTheStore(t *testing.T) {
-	svc := newTestHotelService(t, &fakeStore{})
+	svc := newTestService(t, &fakeStore{})
 	request := validCreateHotelRequest()
 	request.CityCode = "TYO" // a real city, but not in the sample reference data
 
@@ -173,7 +156,7 @@ func TestServiceCreateHotel_reportsAHotelThatAlreadyExists(t *testing.T) {
 			return store.Hotel{}, uniqueViolation(hotelNameKey)
 		},
 	}
-	svc := newTestHotelService(t, db)
+	svc := newTestService(t, db)
 
 	_, err := svc.CreateHotel(t.Context(), validCreateHotelRequest())
 
@@ -196,7 +179,7 @@ func TestServiceCreateHotel_doesNotMistakeOtherDatabaseErrorsForADuplicate(t *te
 					return store.Hotel{}, tc.err
 				},
 			}
-			svc := newTestHotelService(t, db)
+			svc := newTestService(t, db)
 
 			_, err := svc.CreateHotel(t.Context(), validCreateHotelRequest())
 
@@ -231,18 +214,13 @@ func TestServiceCreateHotel_failsWhenARoomTypeOrItsEventCannotBeStored(t *testin
 			)
 			db := hotelDB(&calls, &hotel, &rooms, &events)
 			tc.mutate(db)
-			svc := newTestHotelService(t, db)
+			svc := newTestService(t, db)
 
 			_, err := svc.CreateHotel(t.Context(), validCreateHotelRequest())
 
 			require.ErrorIs(t, err, errBoom)
 		})
 	}
-}
-
-// hotelService is the integration environment's service with its hotel methods.
-func (e *env) hotelService() *service {
-	return newService(e.pgStore, e.reference, nil, e.seats, time.Now)
 }
 
 type hotelRowCounts struct {
@@ -280,7 +258,7 @@ func (e *env) roomTypeEvents(t *testing.T) []roomTypeCreatedData {
 func TestHotelsInPostgres_createStoresTheHotelItsRoomTypesAndOneEventPerRoomType(t *testing.T) {
 	e := newEnv(t)
 
-	created, err := e.hotelService().CreateHotel(t.Context(), validCreateHotelRequest())
+	created, err := e.service.CreateHotel(t.Context(), validCreateHotelRequest())
 	require.NoError(t, err)
 
 	require.True(t, validUUID(created.ID))
@@ -301,7 +279,7 @@ func TestHotelsInPostgres_createStoresTheHotelItsRoomTypesAndOneEventPerRoomType
 
 func TestHotelsInPostgres_createRejectsADuplicateInTheSameCityWithoutWritingAnything(t *testing.T) {
 	e := newEnv(t)
-	svc := e.hotelService()
+	svc := e.service
 	_, err := svc.CreateHotel(t.Context(), validCreateHotelRequest())
 	require.NoError(t, err)
 
@@ -318,7 +296,7 @@ func TestHotelsInPostgres_createRejectsADuplicateInTheSameCityWithoutWritingAnyt
 
 func TestHotelsInPostgres_createRollsBackTheHotelAndItsRoomTypesWhenTheOutboxInsertFails(t *testing.T) {
 	e := newEnv(t)
-	svc := newService(failingOutboxStore{PgStore: e.pgStore}, e.reference, nil, e.seats, time.Now)
+	svc := NewService(failingOutboxStore{PgStore: e.pgStore}, e.reference, nil, e.seats)
 
 	_, err := svc.CreateHotel(t.Context(), validCreateHotelRequest())
 
@@ -337,7 +315,7 @@ func TestServiceSearchHotels_asksForTheCitysRoomTypesForTheGuestsAndPagesTheHote
 			return hotelSearchFixture(), nil
 		},
 	}
-	svc := newTestHotelServiceAt(t, db, hotelSearchNow)
+	svc := newTestServiceAt(t, db, hotelSearchNow)
 	request := validSearchHotelsRequest()
 	request.Guests = 2
 	request.PageSize = 2
@@ -371,7 +349,7 @@ func TestServiceSearchHotels_rejectsACheckInBeforeTodayInUTCWithoutQuerying(t *t
 					return nil, nil
 				}
 			}
-			svc := newTestHotelServiceAt(t, db, now)
+			svc := newTestServiceAt(t, db, now)
 			request := validSearchHotelsRequest()
 			request.CheckIn = tc.checkIn
 			request.CheckOut = tc.checkIn.AddDate(0, 0, 2)
@@ -388,7 +366,7 @@ func TestServiceSearchHotels_rejectsACheckInBeforeTodayInUTCWithoutQuerying(t *t
 }
 
 func TestServiceSearchHotels_rejectsAnInvalidRequestWithoutQuerying(t *testing.T) {
-	svc := newTestHotelServiceAt(t, &fakeStore{}, hotelSearchNow)
+	svc := newTestServiceAt(t, &fakeStore{}, hotelSearchNow)
 	request := validSearchHotelsRequest()
 	request.Guests = 0
 
@@ -398,7 +376,7 @@ func TestServiceSearchHotels_rejectsAnInvalidRequestWithoutQuerying(t *testing.T
 }
 
 func TestServiceSearchHotels_returnsAnEmptyListForAnUnknownCityWithoutQuerying(t *testing.T) {
-	svc := newTestHotelServiceAt(t, &fakeStore{}, hotelSearchNow)
+	svc := newTestServiceAt(t, &fakeStore{}, hotelSearchNow)
 	request := validSearchHotelsRequest()
 	request.City = "TYO" // a real city, but not in the sample reference data
 
@@ -416,7 +394,7 @@ func TestServiceSearchHotels_returnsAnEmptyListWhenNoRoomTypeFits(t *testing.T) 
 			return nil, nil
 		},
 	}
-	svc := newTestHotelServiceAt(t, db, hotelSearchNow)
+	svc := newTestServiceAt(t, db, hotelSearchNow)
 
 	response, err := svc.SearchHotels(t.Context(), validSearchHotelsRequest())
 
@@ -431,7 +409,7 @@ func TestServiceSearchHotels_wrapsADatabaseFailure(t *testing.T) {
 			return nil, errBoom
 		},
 	}
-	svc := newTestHotelServiceAt(t, db, hotelSearchNow)
+	svc := newTestServiceAt(t, db, hotelSearchNow)
 
 	_, err := svc.SearchHotels(t.Context(), validSearchHotelsRequest())
 
@@ -444,7 +422,7 @@ func TestHotelsInPostgres_searchFindsTheCitysHotelsWithARoomForTheGuests(t *test
 		t.Helper()
 		request := validCreateHotelRequest()
 		request.Name, request.CityCode, request.RoomTypes = name, city, rooms
-		created, err := e.hotelService().CreateHotel(t.Context(), request)
+		created, err := e.service.CreateHotel(t.Context(), request)
 		require.NoError(t, err)
 		return created.ID
 	}
