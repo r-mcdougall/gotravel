@@ -242,3 +242,85 @@ func TestClient_loginNeverPutsThePasswordInAConnectionError(t *testing.T) {
 	require.ErrorContains(t, err, "log in as admin@example.test")
 	require.NotContains(t, err.Error(), "secret")
 }
+
+var sampleHotel = hotelSpec{
+	Name:       "Denpasar Central Hotel",
+	CityCode:   "DPS",
+	Address:    "Demo Street 2, Denpasar",
+	StarRating: 3,
+	RoomTypes: []roomTypeSpec{
+		{Name: "Superior Double", MaxGuests: 2, TotalRooms: 40, PricePerNight: 630_000},
+		{Name: "Family Room", MaxGuests: 4, TotalRooms: 10, PricePerNight: 1_080_000},
+	},
+}
+
+func TestClient_createHotelSendsTheSpecWithTheAdminToken(t *testing.T) {
+	var auth, path string
+	var got map[string]any
+	c := loggedInClient(t, func(w http.ResponseWriter, r *http.Request) {
+		auth, path = r.Header.Get("Authorization"), r.URL.Path
+		require.Equal(t, http.MethodPost, r.Method)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+		writeJSON(w, http.StatusCreated, `{"id":"1"}`)
+	})
+
+	result, err := c.createHotel(context.Background(), sampleHotel)
+
+	require.NoError(t, err)
+	require.Equal(t, outcomeCreated, result)
+	require.Equal(t, "Bearer token-1", auth)
+	require.Equal(t, createHotelPath, path)
+	require.Equal(t, map[string]any{
+		"name":        "Denpasar Central Hotel",
+		"city_code":   "DPS",
+		"address":     "Demo Street 2, Denpasar",
+		"star_rating": float64(3),
+		"room_types": []any{
+			map[string]any{"name": "Superior Double", "max_guests": float64(2), "total_rooms": float64(40), "price_per_night": float64(630_000)},
+			map[string]any{"name": "Family Room", "max_guests": float64(4), "total_rooms": float64(10), "price_per_night": float64(1_080_000)},
+		},
+	}, got)
+}
+
+func TestClient_aHotelThatAlreadyExistsIsNotAnError(t *testing.T) {
+	c := loggedInClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusConflict, `{"error":{"code":"HOTEL_EXISTS","message":"hotel already exists in this city"}}`)
+	})
+
+	result, err := c.createHotel(context.Background(), sampleHotel)
+
+	require.NoError(t, err)
+	require.Equal(t, outcomeExisting, result)
+}
+
+func TestClient_aFlightConflictOnAHotelIsAnError(t *testing.T) {
+	c := loggedInClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusConflict, `{"error":{"code":"FLIGHT_EXISTS","message":"flight already exists for this departure time"}}`)
+	})
+
+	_, err := c.createHotel(context.Background(), sampleHotel)
+
+	require.ErrorContains(t, err, "HTTP 409 FLIGHT_EXISTS")
+}
+
+func TestClient_aHotelValidationErrorNamesTheHotelAndTheFields(t *testing.T) {
+	c := loggedInClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusBadRequest, `{"error":{"code":"VALIDATION_ERROR","message":"request is invalid","details":[`+
+			`{"field":"city_code","message":"unknown city"},{"field":"room_types[1].max_guests","message":"must be between 1 and 10"}]}}`)
+	})
+
+	_, err := c.createHotel(context.Background(), sampleHotel)
+
+	require.EqualError(t, err, `create hotel "Denpasar Central Hotel" in DPS: HTTP 400 VALIDATION_ERROR: request is invalid; `+
+		`city_code: unknown city; room_types[1].max_guests: must be between 1 and 10`)
+}
+
+func TestClient_reportsAServerThatIsNotThereWhenCreatingAHotel(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	c := newClient(server.URL, server.Client())
+	server.Close()
+
+	_, err := c.createHotel(context.Background(), sampleHotel)
+
+	require.ErrorContains(t, err, `create hotel "Denpasar Central Hotel" in DPS`)
+}

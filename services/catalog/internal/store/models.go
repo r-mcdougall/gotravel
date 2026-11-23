@@ -20,6 +20,11 @@ type Airport struct {
 	Timezone string
 }
 
+type City struct {
+	Code string
+	Name string
+}
+
 type Flight struct {
 	ID                  string
 	FlightNumber        string
@@ -37,10 +42,29 @@ type Flight struct {
 	AvailabilityVersion int64
 }
 
+type Hotel struct {
+	ID         string
+	Name       string
+	CityCode   string
+	Address    string
+	StarRating int32
+	CreatedAt  time.Time
+}
+
 type Outbox struct {
 	ID          string
 	EventType   string
 	Payload     []byte
 	CreatedAt   time.Time
 	PublishedAt *time.Time
+}
+
+type RoomType struct {
+	ID            string
+	HotelID       string
+	Name          string
+	MaxGuests     int32
+	TotalRooms    int32
+	PricePerNight int64
+	CreatedAt     time.Time
 }

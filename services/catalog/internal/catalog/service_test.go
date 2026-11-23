@@ -27,6 +27,9 @@ type fakeStore struct {
 	listFlightsByRouteDay func(context.Context, store.ListFlightsByRouteDayParams) ([]store.Flight, error)
 	countFlights          func(context.Context, store.CountFlightsParams) (int64, error)
 	insertOutboxEvent     func(context.Context, store.InsertOutboxEventParams) error
+	createHotel           func(context.Context, store.CreateHotelParams) (store.Hotel, error)
+	createRoomType        func(context.Context, store.CreateRoomTypeParams) (store.RoomType, error)
+	listRoomTypesByCity   func(context.Context, store.ListRoomTypesByCityParams) ([]store.ListRoomTypesByCityRow, error)
 }
 
 func (f *fakeStore) CreateFlight(ctx context.Context, arg store.CreateFlightParams) (store.Flight, error) {
@@ -91,6 +94,30 @@ func (f *fakeStore) InsertOutboxEvent(ctx context.Context, arg store.InsertOutbo
 		f.t.Fatal("unexpected call to InsertOutboxEvent")
 	}
 	return f.insertOutboxEvent(ctx, arg)
+}
+
+func (f *fakeStore) CreateHotel(ctx context.Context, arg store.CreateHotelParams) (store.Hotel, error) {
+	f.t.Helper()
+	if f.createHotel == nil {
+		f.t.Fatal("unexpected call to CreateHotel")
+	}
+	return f.createHotel(ctx, arg)
+}
+
+func (f *fakeStore) CreateRoomType(ctx context.Context, arg store.CreateRoomTypeParams) (store.RoomType, error) {
+	f.t.Helper()
+	if f.createRoomType == nil {
+		f.t.Fatal("unexpected call to CreateRoomType")
+	}
+	return f.createRoomType(ctx, arg)
+}
+
+func (f *fakeStore) ListRoomTypesByCity(ctx context.Context, arg store.ListRoomTypesByCityParams) ([]store.ListRoomTypesByCityRow, error) {
+	f.t.Helper()
+	if f.listRoomTypesByCity == nil {
+		f.t.Fatal("unexpected call to ListRoomTypesByCity")
+	}
+	return f.listRoomTypesByCity(ctx, arg)
 }
 
 func (f *fakeStore) InTx(_ context.Context, fn func(queries) error) error {

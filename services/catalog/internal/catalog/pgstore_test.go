@@ -82,6 +82,20 @@ func TestLoadReference_loadsEveryMigratedAirlineAndAirport(t *testing.T) {
 	}
 }
 
+func TestLoadReference_loadsEveryMigratedCity(t *testing.T) {
+	e := newEnv(t)
+
+	for code, name := range map[string]string{
+		"JKT": "Jakarta", "SUB": "Surabaya", "MES": "Medan", "JOG": "Yogyakarta",
+		"DPS": "Denpasar", "UPG": "Makassar", "BPN": "Balikpapan", "DJJ": "Jayapura",
+		"SIN": "Singapore", "KUL": "Kuala Lumpur", "TYO": "Tokyo",
+	} {
+		city, ok := e.reference.City(code)
+		require.True(t, ok, code)
+		require.Equal(t, name, city.Name, code)
+	}
+}
+
 func TestFlightsInPostgres_createStoresTheFlightAndExactlyOneOutboxEvent(t *testing.T) {
 	e := newEnv(t)
 
