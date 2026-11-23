@@ -5,6 +5,8 @@ import "time"
 const (
 	maxPassengers   = 9
 	maxFullNameLen  = 100
+	maxGuests       = 10
+	maxNights       = 14
 	defaultPage     = 1
 	maxPage         = 10_000
 	defaultPageSize = 20
@@ -68,6 +70,48 @@ type PageMeta struct {
 	Page     int32 `json:"page"`
 	PageSize int32 `json:"page_size"`
 	Total    int64 `json:"total"`
+}
+
+type HotelHoldRequest struct {
+	RoomTypeID string `json:"room_type_id"`
+	CheckIn    string `json:"check_in"`
+	CheckOut   string `json:"check_out"`
+	Guests     int32  `json:"guests"`
+	GuestName  string `json:"guest_name"`
+}
+
+type HotelBookingResponse struct {
+	ID            string          `json:"id"`
+	Status        string          `json:"status"`
+	Hotel         HotelSummary    `json:"hotel"`
+	RoomType      RoomTypeSummary `json:"room_type"`
+	CheckIn       string          `json:"check_in"`
+	CheckOut      string          `json:"check_out"`
+	Nights        int64           `json:"nights"`
+	Guests        int32           `json:"guests"`
+	GuestName     string          `json:"guest_name"`
+	PricePerNight int64           `json:"price_per_night"`
+	TotalPrice    int64           `json:"total_price"`
+	ExpiresAt     time.Time       `json:"expires_at"`
+	PaymentID     *string         `json:"payment_id"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+type HotelSummary struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	CityCode string `json:"city_code"`
+}
+
+type RoomTypeSummary struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type HotelBookingListResponse struct {
+	Data []HotelBookingResponse `json:"data"`
+	Meta PageMeta               `json:"meta"`
 }
 
 type AnalyticsRequest struct {
