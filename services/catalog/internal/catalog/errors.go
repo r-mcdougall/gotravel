@@ -12,6 +12,7 @@ var (
 	ErrFlightExists       = errors.New("flight already exists for this departure time")
 	ErrCapacityBelowSold  = errors.New("capacity is lower than the seats already held or sold")
 	ErrBookingUnavailable = errors.New("booking service unavailable")
+	ErrHotelExists        = errors.New("hotel already exists in this city")
 )
 
 type ValidationError struct {

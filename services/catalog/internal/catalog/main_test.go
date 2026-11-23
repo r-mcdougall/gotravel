@@ -67,14 +67,14 @@ type env struct {
 }
 
 // newEnv connects to the shared database and empties the tables the tests
-// write to. Airlines and airports hold migrated reference data and stay.
+// write to. Airlines, airports and cities hold migrated reference data and stay.
 func newEnv(t *testing.T) *env {
 	t.Helper()
 
 	pool, err := database.Connect(t.Context(), databaseURL(t))
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	_, err = pool.Exec(t.Context(), "TRUNCATE flights, outbox")
+	_, err = pool.Exec(t.Context(), "TRUNCATE flights, room_types, hotels, outbox")
 	require.NoError(t, err)
 
 	pgStore := NewPgStore(pool)

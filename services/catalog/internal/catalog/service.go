@@ -26,6 +26,8 @@ type queries interface {
 	ListFlightsByRouteDay(ctx context.Context, arg store.ListFlightsByRouteDayParams) ([]store.Flight, error)
 	CountFlights(ctx context.Context, arg store.CountFlightsParams) (int64, error)
 	InsertOutboxEvent(ctx context.Context, arg store.InsertOutboxEventParams) error
+	CreateHotel(ctx context.Context, arg store.CreateHotelParams) (store.Hotel, error)
+	CreateRoomType(ctx context.Context, arg store.CreateRoomTypeParams) (store.RoomType, error)
 }
 
 var _ queries = (*store.Queries)(nil)
@@ -437,8 +439,12 @@ func flightWriteError(op string, err error) error {
 }
 
 func isScheduleCollision(err error) bool {
+	return isUniqueViolation(err, flightScheduleKey)
+}
+
+func isUniqueViolation(err error, constraint string) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode && pgErr.ConstraintName == flightScheduleKey
+	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode && pgErr.ConstraintName == constraint
 }
 
 func nilIfEmpty(s string) *string {

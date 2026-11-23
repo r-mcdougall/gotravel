@@ -18,6 +18,7 @@ type fakeReferenceQueries struct {
 	t            *testing.T
 	listAirlines func(ctx context.Context) ([]store.Airline, error)
 	listAirports func(ctx context.Context) ([]store.Airport, error)
+	listCities   func(ctx context.Context) ([]store.City, error)
 }
 
 func (f *fakeReferenceQueries) ListAirlines(ctx context.Context) ([]store.Airline, error) {
@@ -36,6 +37,14 @@ func (f *fakeReferenceQueries) ListAirports(ctx context.Context) ([]store.Airpor
 	return f.listAirports(ctx)
 }
 
+func (f *fakeReferenceQueries) ListCities(ctx context.Context) ([]store.City, error) {
+	f.t.Helper()
+	if f.listCities == nil {
+		f.t.Fatal("unexpected call to ListCities")
+	}
+	return f.listCities(ctx)
+}
+
 func sampleReferenceQueries(t *testing.T) *fakeReferenceQueries {
 	t.Helper()
 	return &fakeReferenceQueries{
@@ -50,6 +59,12 @@ func sampleReferenceQueries(t *testing.T) *fakeReferenceQueries {
 			return []store.Airport{
 				{Code: "CGK", Name: "Soekarno-Hatta International Airport", City: "Jakarta", Timezone: "Asia/Jakarta"},
 				{Code: "DPS", Name: "I Gusti Ngurah Rai International Airport", City: "Denpasar", Timezone: "Asia/Makassar"},
+			}, nil
+		},
+		listCities: func(context.Context) ([]store.City, error) {
+			return []store.City{
+				{Code: "JKT", Name: "Jakarta"},
+				{Code: "DPS", Name: "Denpasar"},
 			}, nil
 		},
 	}
@@ -92,10 +107,14 @@ func TestLoadReference_doesNotKnowUnlistedCodes(t *testing.T) {
 	_, knownAirline := reference.Airline("XX")
 	_, knownAirport := reference.Airport("XXX")
 	_, lowerCaseAirport := reference.Airport("cgk")
+	_, knownCity := reference.City("TYO")
+	_, airportAsCity := reference.City("CGK")
 
 	require.False(t, knownAirline)
 	require.False(t, knownAirport)
 	require.False(t, lowerCaseAirport)
+	require.False(t, knownCity)
+	require.False(t, airportAsCity, "cities and airports have separate codes")
 }
 
 func TestLoadReference_failsOnAnInvalidTimeZone(t *testing.T) {
@@ -134,4 +153,26 @@ func TestLoadReference_failsWhenListingAirportsFails(t *testing.T) {
 
 	require.ErrorIs(t, err, errBoom)
 	require.ErrorContains(t, err, "list airports")
+}
+
+func TestLoadReference_resolvesCitiesByCode(t *testing.T) {
+	reference, err := LoadReference(t.Context(), sampleReferenceQueries(t))
+	require.NoError(t, err)
+
+	city, ok := reference.City("JKT")
+
+	require.True(t, ok)
+	require.Equal(t, CityResponse{Code: "JKT", Name: "Jakarta"}, city)
+}
+
+func TestLoadReference_failsWhenListingCitiesFails(t *testing.T) {
+	queries := sampleReferenceQueries(t)
+	queries.listCities = func(context.Context) ([]store.City, error) {
+		return nil, errBoom
+	}
+
+	_, err := LoadReference(t.Context(), queries)
+
+	require.ErrorIs(t, err, errBoom)
+	require.ErrorContains(t, err, "list cities")
 }
