@@ -120,6 +120,66 @@ func (s unusedStore) ListTopRoutes(context.Context, store.ListTopRoutesParams) (
 	return nil, nil
 }
 
+func (s unusedStore) InsertRoomType(context.Context, store.InsertRoomTypeParams) error {
+	s.fail("InsertRoomType")
+	return nil
+}
+
+func (s unusedStore) GetRoomType(context.Context, string) (store.RoomType, error) {
+	s.fail("GetRoomType")
+	return store.RoomType{}, nil
+}
+
+func (s unusedStore) EnsureRoomNights(context.Context, store.EnsureRoomNightsParams) error {
+	s.fail("EnsureRoomNights")
+	return nil
+}
+
+func (s unusedStore) LockRoomNights(context.Context, store.LockRoomNightsParams) ([]store.RoomNight, error) {
+	s.fail("LockRoomNights")
+	return nil, nil
+}
+
+func (s unusedStore) HoldRoomNights(context.Context, store.HoldRoomNightsParams) error {
+	s.fail("HoldRoomNights")
+	return nil
+}
+
+func (s unusedStore) ReleaseRoomNights(context.Context, store.ReleaseRoomNightsParams) error {
+	s.fail("ReleaseRoomNights")
+	return nil
+}
+
+func (s unusedStore) CreateHotelBooking(context.Context, store.CreateHotelBookingParams) (store.HotelBooking, error) {
+	s.fail("CreateHotelBooking")
+	return store.HotelBooking{}, nil
+}
+
+func (s unusedStore) GetHotelBooking(context.Context, store.GetHotelBookingParams) (store.GetHotelBookingRow, error) {
+	s.fail("GetHotelBooking")
+	return store.GetHotelBookingRow{}, nil
+}
+
+func (s unusedStore) ListHotelBookings(context.Context, store.ListHotelBookingsParams) ([]store.ListHotelBookingsRow, error) {
+	s.fail("ListHotelBookings")
+	return nil, nil
+}
+
+func (s unusedStore) CountHotelBookings(context.Context, string) (int64, error) {
+	s.fail("CountHotelBookings")
+	return 0, nil
+}
+
+func (s unusedStore) CancelHotelBooking(context.Context, store.CancelHotelBookingParams) (store.HotelBooking, error) {
+	s.fail("CancelHotelBooking")
+	return store.HotelBooking{}, nil
+}
+
+func (s unusedStore) ExpireHotelHold(context.Context) (store.ExpireHotelHoldRow, error) {
+	s.fail("ExpireHotelHold")
+	return store.ExpireHotelHoldRow{}, nil
+}
+
 func (s unusedStore) InTx(context.Context, func(queries) error) error {
 	s.fail("InTx")
 	return nil
