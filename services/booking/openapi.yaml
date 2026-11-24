@@ -1,16 +1,19 @@
 openapi: 3.1.0
 info:
   title: GoTravel Booking API
-  version: 1.0.0
+  version: 1.1.0
   description: >
-    Seat holds, the booking lifecycle and booking analytics for admins. Every
+    Seat and hotel room holds, the booking lifecycle and booking analytics for
+    admins. Every
     route requires an access token issued by the auth service. A booking
     belongs to the user in the token; other users' bookings are reported as
     not found. Times are in UTC.
 
 tags:
   - name: bookings
-    description: Holds and bookings of the signed-in user.
+    description: Flight seat holds and bookings of the signed-in user.
+  - name: hotel-bookings
+    description: Hotel room holds and bookings of the signed-in user.
   - name: admin
     description: Booking analytics. Requires the `admin` role.
   - name: internal
@@ -159,6 +162,147 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Booking"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The booking is not held.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: BOOKING_NOT_HELD
+                  message: only a held booking can be cancelled
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/hotel-bookings:
+    post:
+      tags: [hotel-bookings]
+      summary: Hold a room
+      description: >
+        Reserves one room of a room type for every night of the stay, from
+        `check_in` to the night before `check_out`, and returns a `HELD` hotel
+        booking. The hold expires at `expires_at` (15 minutes by default)
+        unless it is paid. The price per night is fixed when the hold is made.
+        All nights are taken in one transaction: if any night has no free room,
+        nothing is held. A room type is known to booking once the catalog has
+        published it.
+      operationId: holdRoom
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HotelHoldRequest"
+      responses:
+        "201":
+          description: Room held.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HotelBooking"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No room type has this id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: room type not found
+        "409":
+          description: At least one night of the stay has no free room of this type.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: ROOMS_UNAVAILABLE
+                  message: no room of this type is free on every night of the stay
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      tags: [hotel-bookings]
+      summary: List my hotel bookings
+      description: Hotel bookings of the signed-in user in every status, newest first.
+      operationId: listHotelBookings
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: A page of hotel bookings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HotelBookingList"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/hotel-bookings/{id}:
+    parameters:
+      - $ref: "#/components/parameters/BookingId"
+    get:
+      tags: [hotel-bookings]
+      summary: Get a hotel booking
+      operationId: getHotelBooking
+      responses:
+        "200":
+          description: The hotel booking.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HotelBooking"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/hotel-bookings/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/BookingId"
+    post:
+      tags: [hotel-bookings]
+      summary: Cancel a room hold
+      description: >
+        Cancels a `HELD` hotel booking and releases the room on every night of
+        the stay. Confirmed, expired and cancelled bookings cannot be cancelled.
+      operationId: cancelHotelBooking
+      responses:
+        "200":
+          description: The cancelled hotel booking.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HotelBooking"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -481,6 +625,140 @@ components:
           type: string
           format: date-time
 
+    HotelHoldRequest:
+      type: object
+      additionalProperties: false
+      required: [room_type_id, check_in, check_out, guests, guest_name]
+      properties:
+        room_type_id:
+          type: string
+          format: uuid
+        check_in:
+          type: string
+          format: date
+          description: Not before today in UTC.
+          example: "2026-12-01"
+        check_out:
+          type: string
+          format: date
+          description: >
+            After `check_in` and at most 14 nights later. The room is not held
+            on this night.
+          example: "2026-12-04"
+        guests:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: At most the `max_guests` of the room type.
+          example: 2
+        guest_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Surrounding spaces are trimmed.
+          example: John Doe
+
+    HotelBooking:
+      type: object
+      required:
+        - id
+        - status
+        - hotel
+        - room_type
+        - check_in
+        - check_out
+        - nights
+        - guests
+        - guest_name
+        - price_per_night
+        - total_price
+        - expires_at
+        - payment_id
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/BookingStatus"
+        hotel:
+          type: object
+          required: [id, name, city_code]
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+              example: Seminyak Garden Hotel
+            city_code:
+              type: string
+              example: DPS
+        room_type:
+          type: object
+          required: [id, name]
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+              example: Deluxe King
+        check_in:
+          type: string
+          format: date
+          example: "2026-12-01"
+        check_out:
+          type: string
+          format: date
+          example: "2026-12-04"
+        nights:
+          type: integer
+          format: int64
+          example: 3
+        guests:
+          type: integer
+          example: 2
+        guest_name:
+          type: string
+          example: John Doe
+        price_per_night:
+          type: integer
+          format: int64
+          description: Price per night in rupiah, fixed when the hold was made.
+          example: 1500000
+        total_price:
+          type: integer
+          format: int64
+          description: "`price_per_night` times `nights`."
+          example: 4500000
+        expires_at:
+          type: string
+          format: date-time
+          description: When an unpaid hold expires.
+        payment_id:
+          type: [string, "null"]
+          format: uuid
+          description: The payment that confirmed the booking; null until it is `CONFIRMED`.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    HotelBookingList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/HotelBooking"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+
     PageMeta:
       type: object
       required: [page, page_size, total]
@@ -491,7 +769,7 @@ components:
           type: integer
         total:
           type: integer
-          description: Number of the user's bookings across all pages.
+          description: Number of the user's bookings of this kind across all pages.
 
     BookingList:
       type: object
@@ -613,6 +891,7 @@ components:
                 - NOT_FOUND
                 - FLIGHT_DEPARTED
                 - NOT_ENOUGH_SEATS
+                - ROOMS_UNAVAILABLE
                 - BOOKING_NOT_HELD
                 - INTERNAL_ERROR
             message:
