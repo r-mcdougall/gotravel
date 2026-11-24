@@ -145,14 +145,7 @@ func TestServiceHoldRoom_neverHoldsMoreRoomsThanANightHas(t *testing.T) {
 		require.ErrorIs(t, err, ErrRoomsUnavailable)
 	}
 	require.Equal(t, rooms, succeeded)
-
-	var mismatched int
-	require.NoError(t, pool.QueryRow(t.Context(), `
-		SELECT count(*) FROM room_nights n
-		WHERE n.held_rooms <> (
-			SELECT count(*) FROM hotel_bookings b
-			WHERE b.status = 'HELD' AND b.check_in <= n.night AND n.night < b.check_out)`).Scan(&mismatched))
-	require.Zero(t, mismatched, "every night holds exactly the rooms of the held bookings that cover it")
+	requireNightsMatchHolds(t, pool)
 	require.Equal(t, int32(rooms), heldRooms(t, pool)[day(now, 10)])
 }
 
@@ -259,6 +252,20 @@ func addRoomType(t *testing.T, pool *pgxpool.Pool, totalRooms, maxGuests int32) 
 		PricePerNight: 1_500_000,
 	})
 	require.NoError(t, err)
+}
+
+// requireNightsMatchHolds checks that every night holds exactly the rooms of the held bookings that cover it.
+func requireNightsMatchHolds(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+
+	var mismatched int
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT count(*) FROM room_nights n
+		WHERE n.held_rooms <> (
+			SELECT count(*) FROM hotel_bookings b
+			WHERE b.room_type_id = n.room_type_id AND b.status = 'HELD'
+				AND b.check_in <= n.night AND n.night < b.check_out)`).Scan(&mismatched))
+	require.Zero(t, mismatched)
 }
 
 // heldRooms returns the held rooms of the test room type per night.

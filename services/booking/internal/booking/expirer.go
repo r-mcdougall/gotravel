@@ -32,16 +32,21 @@ func NewExpirer(db bookingStore, expired counter, log *slog.Logger) *Expirer {
 }
 
 func (e *Expirer) Run(ctx context.Context) {
+	runExpiry(ctx, e.log, e.expireBatch)
+}
+
+// runExpiry calls expireBatch until ctx is done: again at once after a full batch, after expireInterval otherwise, and with a growing backoff after a failure.
+func runExpiry(ctx context.Context, log *slog.Logger, expireBatch func(context.Context) (int, error)) {
 	wait := expireInterval
 
 	for {
-		n, err := e.expireBatch(ctx)
+		n, err := expireBatch(ctx)
 		if ctx.Err() != nil {
 			return
 		}
 
 		if err != nil {
-			e.log.WarnContext(ctx, "expiring holds failed", slog.Any("error", err), slog.Duration("retry_in", wait))
+			log.WarnContext(ctx, "expiring holds failed", slog.Any("error", err), slog.Duration("retry_in", wait))
 			if !sleep(ctx, wait) {
 				return
 			}
@@ -51,7 +56,7 @@ func (e *Expirer) Run(ctx context.Context) {
 
 		wait = expireInterval
 		if n > 0 {
-			e.log.InfoContext(ctx, "expired holds", slog.Int("count", n))
+			log.InfoContext(ctx, "expired holds", slog.Int("count", n))
 		}
 		if n == expireBatchSize {
 			continue
