@@ -43,6 +43,11 @@ var (
 		RoutingKey: "payment.succeeded",
 		Queue:      "booking.payment-succeeded",
 	}
+	roomTypeCreated = messaging.Subscription{
+		Exchange:   "catalog.events",
+		RoutingKey: "room_type.created",
+		Queue:      "booking.room-type-created",
+	}
 )
 
 func main() {
@@ -117,6 +122,10 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		messaging.Consume(ctx, rabbitmqURL, paymentSucceeded, events.HandlePaymentSucceeded,
 			log.With(slog.String("component", "payment_succeeded_consumer")))
 	})()
+	defer runInBackground(ctx, func(ctx context.Context) {
+		messaging.Consume(ctx, rabbitmqURL, roomTypeCreated, events.HandleRoomTypeCreated,
+			log.With(slog.String("component", "room_type_consumer")))
+	})()
 
 	expiredHolds := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "booking_holds_expired_total",
@@ -125,6 +134,14 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	appMetrics.Registry().MustRegister(expiredHolds)
 	expirer := booking.NewExpirer(pgStore, expiredHolds, log.With(slog.String("component", "hold_expirer")))
 	defer runInBackground(ctx, expirer.Run)()
+
+	expiredHotelHolds := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "booking_hotel_holds_expired_total",
+		Help: "Hotel holds that expired before they were paid or cancelled.",
+	})
+	appMetrics.Registry().MustRegister(expiredHotelHolds)
+	hotelExpirer := booking.NewHotelExpirer(pgStore, expiredHotelHolds, log.With(slog.String("component", "hotel_hold_expirer")))
+	defer runInBackground(ctx, hotelExpirer.Run)()
 
 	service := booking.NewService(pgStore, holdTTL)
 	handler := booking.NewHandler(service, log, authn.NewVerifier(publicKey))
