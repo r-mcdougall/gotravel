@@ -30,6 +30,19 @@ type queries interface {
 	SellHeldSeats(ctx context.Context, arg store.SellHeldSeatsParams) error
 	SummarizeBookingsByStatus(ctx context.Context, arg store.SummarizeBookingsByStatusParams) ([]store.SummarizeBookingsByStatusRow, error)
 	ListTopRoutes(ctx context.Context, arg store.ListTopRoutesParams) ([]store.ListTopRoutesRow, error)
+
+	InsertRoomType(ctx context.Context, arg store.InsertRoomTypeParams) error
+	GetRoomType(ctx context.Context, roomTypeID string) (store.RoomType, error)
+	EnsureRoomNights(ctx context.Context, arg store.EnsureRoomNightsParams) error
+	LockRoomNights(ctx context.Context, arg store.LockRoomNightsParams) ([]store.RoomNight, error)
+	HoldRoomNights(ctx context.Context, arg store.HoldRoomNightsParams) error
+	ReleaseRoomNights(ctx context.Context, arg store.ReleaseRoomNightsParams) error
+	CreateHotelBooking(ctx context.Context, arg store.CreateHotelBookingParams) (store.HotelBooking, error)
+	GetHotelBooking(ctx context.Context, arg store.GetHotelBookingParams) (store.GetHotelBookingRow, error)
+	ListHotelBookings(ctx context.Context, arg store.ListHotelBookingsParams) ([]store.ListHotelBookingsRow, error)
+	CountHotelBookings(ctx context.Context, userID string) (int64, error)
+	CancelHotelBooking(ctx context.Context, arg store.CancelHotelBookingParams) (store.HotelBooking, error)
+	ExpireHotelHold(ctx context.Context) (store.ExpireHotelHoldRow, error)
 }
 
 var _ queries = (*store.Queries)(nil)

@@ -20,6 +20,11 @@ type Service interface {
 	CancelBooking(ctx context.Context, userID, id string) (Response, error)
 	Analytics(ctx context.Context, request AnalyticsRequest) (Analytics, error)
 	FlightSeats(ctx context.Context, flightID string) (FlightSeats, error)
+
+	HoldRoom(ctx context.Context, userID string, request HotelHoldRequest) (HotelBookingResponse, error)
+	GetHotelBooking(ctx context.Context, userID, id string) (HotelBookingResponse, error)
+	ListHotelBookings(ctx context.Context, userID string, request ListRequest) (HotelBookingListResponse, error)
+	CancelHotelBooking(ctx context.Context, userID, id string) (HotelBookingResponse, error)
 }
 
 type Handler struct {
@@ -44,6 +49,11 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/api/v1/bookings", h.ListBookings)
 		r.Get("/api/v1/bookings/{id}", h.GetBooking)
 		r.Post("/api/v1/bookings/{id}/cancel", h.CancelBooking)
+
+		r.Post("/api/v1/hotel-bookings", h.HoldRoom)
+		r.Get("/api/v1/hotel-bookings", h.ListHotelBookings)
+		r.Get("/api/v1/hotel-bookings/{id}", h.GetHotelBooking)
+		r.Post("/api/v1/hotel-bookings/{id}/cancel", h.CancelHotelBooking)
 
 		r.Group(func(r chi.Router) {
 			r.Use(authn.RequireRole(authn.RoleAdmin))
@@ -130,6 +140,58 @@ func (h *Handler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 	httpserver.WriteJSON(w, http.StatusOK, response)
 }
 
+func (h *Handler) HoldRoom(w http.ResponseWriter, r *http.Request) {
+	var request HotelHoldRequest
+	if err := httpserver.DecodeJSON(w, r, &request); err != nil {
+		invalidBody(w)
+		return
+	}
+
+	response, err := h.service.HoldRoom(r.Context(), userID(r), request)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusCreated, response)
+}
+
+func (h *Handler) ListHotelBookings(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	request := ListRequest{
+		Page:     int32Param(query.Get("page"), defaultPage, maxPage),
+		PageSize: int32Param(query.Get("page_size"), defaultPageSize, maxPageSize),
+	}
+
+	response, err := h.service.ListHotelBookings(r.Context(), userID(r), request)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) GetHotelBooking(w http.ResponseWriter, r *http.Request) {
+	response, err := h.service.GetHotelBooking(r.Context(), userID(r), chi.URLParam(r, "id"))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) CancelHotelBooking(w http.ResponseWriter, r *http.Request) {
+	response, err := h.service.CancelHotelBooking(r.Context(), userID(r), chi.URLParam(r, "id"))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusOK, response)
+}
+
 func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var validationErr *ValidationError
 
@@ -144,6 +206,10 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		httpserver.WriteError(w, http.StatusConflict, "FLIGHT_DEPARTED", "the flight has already departed")
 	case errors.Is(err, ErrNotEnoughSeats):
 		httpserver.WriteError(w, http.StatusConflict, "NOT_ENOUGH_SEATS", "not enough seats are available for every passenger")
+	case errors.Is(err, ErrRoomTypeNotFound):
+		httpserver.WriteError(w, http.StatusNotFound, "NOT_FOUND", "room type not found")
+	case errors.Is(err, ErrRoomsUnavailable):
+		httpserver.WriteError(w, http.StatusConflict, "ROOMS_UNAVAILABLE", "no room of this type is free on every night of the stay")
 	case errors.Is(err, ErrNotHeld):
 		httpserver.WriteError(w, http.StatusConflict, "BOOKING_NOT_HELD", "only a held booking can be cancelled")
 	default:

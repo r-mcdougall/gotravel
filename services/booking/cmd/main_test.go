@@ -266,8 +266,8 @@ func TestRun_appliesMigrationsOnStart(t *testing.T) {
 
 	tables := queryCount(t,
 		`SELECT count(*) FROM information_schema.tables
-		 WHERE table_schema = 'public' AND table_name = 'flight_inventories'`)
-	require.Equal(t, 1, tables)
+		 WHERE table_schema = 'public' AND table_name IN ('flight_inventories', 'room_types', 'room_nights', 'hotel_bookings')`)
+	require.Equal(t, 4, tables)
 
 	require.NoError(t, stop())
 }
@@ -408,7 +408,7 @@ func truncateBookingTables(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close(t.Context()) }()
 
-	_, err = conn.Exec(t.Context(), "TRUNCATE passengers, bookings, outbox, flight_inventories")
+	_, err = conn.Exec(t.Context(), "TRUNCATE passengers, bookings, outbox, flight_inventories, hotel_bookings, room_nights, room_types")
 	require.NoError(t, err)
 }
 
@@ -438,6 +438,10 @@ func TestRun_bookingEndpointsRequireAToken(t *testing.T) {
 		{http.MethodGet, "/api/v1/bookings"},
 		{http.MethodGet, "/api/v1/bookings/" + id},
 		{http.MethodPost, "/api/v1/bookings/" + id + "/cancel"},
+		{http.MethodPost, "/api/v1/hotel-bookings"},
+		{http.MethodGet, "/api/v1/hotel-bookings"},
+		{http.MethodGet, "/api/v1/hotel-bookings/" + id},
+		{http.MethodPost, "/api/v1/hotel-bookings/" + id + "/cancel"},
 	} {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
 			code, body := send(t, route.method, "http://"+addr+route.path, "", "")
@@ -769,4 +773,245 @@ func TestRun_showsTheSeatsOfAFlightToAdminsOnly(t *testing.T) {
 	require.Equal(t, "NOT_FOUND", errorCode(t, body))
 
 	require.NoError(t, stop())
+}
+
+const (
+	roomTypeID = "5d0c7a3e-2b1f-4e8a-9c6d-7f3e1a2b4c5d"
+	hotelID    = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+)
+
+// stayDate is the UTC date offset days from today, as a hold request sends it.
+func stayDate(offset int) string {
+	return time.Now().UTC().AddDate(0, 0, offset).Format(time.DateOnly)
+}
+
+// resetRoomType empties the booking tables and adds one room type with the given number of rooms.
+func resetRoomType(t *testing.T, totalRooms int) {
+	t.Helper()
+	truncateBookingTables(t)
+
+	conn, err := pgx.Connect(t.Context(), os.Getenv("DATABASE_URL"))
+	require.NoError(t, err)
+	defer func() { _ = conn.Close(t.Context()) }()
+
+	_, err = conn.Exec(t.Context(), `
+		INSERT INTO room_types (room_type_id, hotel_id, hotel_name, city_code, name, max_guests, total_rooms, price_per_night)
+		VALUES ($1, $2, 'Seminyak Garden Hotel', 'DPS', 'Deluxe King', 2, $3, 1500000)`,
+		roomTypeID, hotelID, totalRooms)
+	require.NoError(t, err)
+}
+
+func hotelHoldBody(checkIn, checkOut, guests int) string {
+	return fmt.Sprintf(`{"room_type_id": %q, "check_in": %q, "check_out": %q, "guests": %d, "guest_name": "John Doe"}`,
+		roomTypeID, stayDate(checkIn), stayDate(checkOut), guests)
+}
+
+func TestRun_holdsARoomTypeTheCatalogAnnounced(t *testing.T) {
+	truncateBookingTables(t)
+	addr, stop := startServiceWithConsumer(t, "room_type_consumer")
+
+	publisher := messaging.NewPublisher(rabbitmqURL, "catalog.events")
+	t.Cleanup(func() { _ = publisher.Close() })
+	require.NoError(t, publisher.Publish(t.Context(), []messaging.Message{{
+		ID: "9b2d4f61-3a7c-4e15-8d2b-6c0e1f3a5b7d", Type: "room_type.created", Timestamp: time.Now(),
+		Body: []byte(fmt.Sprintf(`{
+			"event_id": "9b2d4f61-3a7c-4e15-8d2b-6c0e1f3a5b7d",
+			"type": "room_type.created",
+			"occurred_at": "2026-11-23T10:00:00Z",
+			"data": {
+				"room_type_id": %q, "hotel_id": %q,
+				"hotel_name": "Seminyak Garden Hotel", "city_code": "DPS",
+				"name": "Deluxe King", "max_guests": 2, "total_rooms": 1, "price_per_night": 1500000
+			}
+		}`, roomTypeID, hotelID)),
+	}}))
+
+	require.Eventually(t, func() bool {
+		conn, err := pgx.Connect(t.Context(), os.Getenv("DATABASE_URL"))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = conn.Close(t.Context()) }()
+
+		var totalRooms int32
+		err = conn.QueryRow(t.Context(), `SELECT total_rooms FROM room_types WHERE room_type_id = $1`, roomTypeID).Scan(&totalRooms)
+		return err == nil && totalRooms == 1
+	}, 10*time.Second, 50*time.Millisecond, "the event reaches booking")
+
+	code, body := send(t, http.MethodPost, "http://"+addr+"/api/v1/hotel-bookings", signToken(t, johnID), hotelHoldBody(7, 9, 2))
+	require.Equal(t, http.StatusCreated, code, body)
+	require.Contains(t, body, `"hotel":{"id":"`+hotelID+`","name":"Seminyak Garden Hotel","city_code":"DPS"}`)
+	require.Contains(t, body, `"total_price":3000000`)
+
+	require.NoError(t, stop())
+}
+
+func TestRun_userHoldsListsAndCancelsAHotelBooking(t *testing.T) {
+	resetRoomType(t, 1)
+	addr, stop := startService(t)
+	bookings := "http://" + addr + "/api/v1/hotel-bookings"
+	john, jane := signToken(t, johnID), signToken(t, janeID)
+
+	type hotelBooking struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		Hotel  struct {
+			ID       string `json:"id"`
+			Name     string `json:"name"`
+			CityCode string `json:"city_code"`
+		} `json:"hotel"`
+		RoomType struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"room_type"`
+		CheckIn       string  `json:"check_in"`
+		CheckOut      string  `json:"check_out"`
+		Nights        int64   `json:"nights"`
+		Guests        int32   `json:"guests"`
+		GuestName     string  `json:"guest_name"`
+		PricePerNight int64   `json:"price_per_night"`
+		TotalPrice    int64   `json:"total_price"`
+		ExpiresAt     string  `json:"expires_at"`
+		PaymentID     *string `json:"payment_id"`
+	}
+
+	code, body := send(t, http.MethodPost, bookings, john, hotelHoldBody(7, 10, 2))
+	require.Equal(t, http.StatusCreated, code, body)
+	require.Contains(t, body, `"payment_id":null`)
+	var held hotelBooking
+	require.NoError(t, json.Unmarshal([]byte(body), &held))
+	require.Equal(t, "HELD", held.Status)
+	require.Equal(t, hotelID, held.Hotel.ID)
+	require.Equal(t, roomTypeID, held.RoomType.ID)
+	require.Equal(t, stayDate(7), held.CheckIn)
+	require.Equal(t, stayDate(10), held.CheckOut)
+	require.Equal(t, int64(3), held.Nights)
+	require.Equal(t, int64(4_500_000), held.TotalPrice)
+	expiresAt, err := time.Parse(time.RFC3339, held.ExpiresAt)
+	require.NoError(t, err)
+	require.WithinDuration(t, time.Now().Add(15*time.Minute), expiresAt, time.Minute, "the default hold lasts 15 minutes")
+
+	code, body = send(t, http.MethodPost, bookings, jane, hotelHoldBody(9, 11, 2))
+	require.Equal(t, http.StatusConflict, code, body)
+	require.Equal(t, "ROOMS_UNAVAILABLE", errorCode(t, body), "the only room is held on one of the nights")
+
+	code, body = send(t, http.MethodPost, bookings, jane, hotelHoldBody(10, 11, 3))
+	require.Equal(t, http.StatusBadRequest, code, body)
+	require.Contains(t, body, `"field":"guests"`)
+
+	code, body = send(t, http.MethodPost, bookings, jane, strings.Replace(hotelHoldBody(10, 11, 1), roomTypeID, hotelID, 1))
+	require.Equal(t, http.StatusNotFound, code, body)
+	require.Contains(t, body, "room type not found")
+
+	code, body = send(t, http.MethodPost, bookings, john, `{"room_type_id": "x", "check_in": "tomorrow", "guests": 0}`)
+	require.Equal(t, http.StatusBadRequest, code, body)
+	require.Equal(t, "VALIDATION_ERROR", errorCode(t, body))
+	for _, field := range []string{"room_type_id", "check_in", "check_out", "guests", "guest_name"} {
+		require.Contains(t, body, `"field":"`+field+`"`)
+	}
+
+	code, body = send(t, http.MethodPost, bookings, john, `{"room_type_id": "x", "nights": 2}`)
+	require.Equal(t, http.StatusBadRequest, code, body)
+	require.Equal(t, "VALIDATION_ERROR", errorCode(t, body), "unknown fields are rejected")
+
+	code, body = send(t, http.MethodGet, bookings+"/"+held.ID, john, "")
+	require.Equal(t, http.StatusOK, code, body)
+	var fetched hotelBooking
+	require.NoError(t, json.Unmarshal([]byte(body), &fetched))
+	require.Equal(t, held, fetched)
+
+	code, body = send(t, http.MethodGet, bookings+"/"+held.ID, jane, "")
+	require.Equal(t, http.StatusNotFound, code, body)
+	require.Equal(t, "NOT_FOUND", errorCode(t, body), "another user's booking looks missing")
+
+	code, body = send(t, http.MethodGet, bookings+"?page_size=1", john, "")
+	require.Equal(t, http.StatusOK, code, body)
+	var list struct {
+		Data []hotelBooking `json:"data"`
+		Meta struct {
+			PageSize int32 `json:"page_size"`
+			Total    int64 `json:"total"`
+		} `json:"meta"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &list))
+	require.Equal(t, int64(1), list.Meta.Total)
+	require.Equal(t, int32(1), list.Meta.PageSize)
+	require.Equal(t, []hotelBooking{held}, list.Data)
+
+	code, body = send(t, http.MethodGet, bookings, jane, "")
+	require.Equal(t, http.StatusOK, code, body)
+	require.Contains(t, body, `"data":[]`)
+
+	code, body = send(t, http.MethodGet, bookings+"?page=0", john, "")
+	require.Equal(t, http.StatusBadRequest, code, body)
+	require.Equal(t, "VALIDATION_ERROR", errorCode(t, body))
+
+	code, body = send(t, http.MethodPost, bookings+"/"+held.ID+"/cancel", jane, "")
+	require.Equal(t, http.StatusNotFound, code, body)
+
+	code, body = send(t, http.MethodPost, bookings+"/"+held.ID+"/cancel", john, "")
+	require.Equal(t, http.StatusOK, code, body)
+	require.Contains(t, body, `"status":"CANCELLED"`)
+
+	code, body = send(t, http.MethodPost, bookings+"/"+held.ID+"/cancel", john, "")
+	require.Equal(t, http.StatusConflict, code, body)
+	require.Equal(t, "BOOKING_NOT_HELD", errorCode(t, body))
+
+	code, body = send(t, http.MethodPost, bookings, jane, hotelHoldBody(9, 11, 2))
+	require.Equal(t, http.StatusCreated, code, body, "the cancelled nights can be held again")
+
+	require.NoError(t, stop())
+}
+
+func TestRun_expiresHotelHoldsThatAreNotPaidInTime(t *testing.T) {
+	resetRoomType(t, 1)
+	t.Setenv("HOLD_TTL", "1s")
+	addr, stop := startService(t)
+	john := signToken(t, johnID)
+
+	code, body := fetch(t, "http://"+addr+"/metrics")
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, body, "booking_hotel_holds_expired_total 0")
+
+	code, body = send(t, http.MethodPost, "http://"+addr+"/api/v1/hotel-bookings", john, hotelHoldBody(7, 9, 1))
+	require.Equal(t, http.StatusCreated, code, body)
+	var held struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &held))
+
+	require.Eventually(t, func() bool {
+		return hotelBookingStatus(t.Context(), addr, john, held.ID) == "EXPIRED"
+	}, 15*time.Second, 100*time.Millisecond, "the expirer runs every 5 seconds")
+
+	require.Zero(t, queryCount(t, `SELECT coalesce(sum(held_rooms), 0) FROM room_nights`), "both nights are released")
+	code, body = fetch(t, "http://"+addr+"/metrics")
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, body, "booking_hotel_holds_expired_total 1")
+	require.Contains(t, body, "booking_holds_expired_total 0", "flight holds are counted apart")
+
+	require.NoError(t, stop())
+}
+
+// hotelBookingStatus returns the status of a hotel booking, or "" when it cannot be read; safe inside require.Eventually.
+func hotelBookingStatus(ctx context.Context, addr, token, id string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/v1/hotel-bookings/"+id, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var booking struct {
+		Status string `json:"status"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&booking) != nil {
+		return ""
+	}
+	return booking.Status
 }
