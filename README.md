@@ -1,10 +1,12 @@
 # GoTravel
 
-A flight booking backend inspired by Traveloka, built as a set of Go microservices.
+A flight and hotel booking backend inspired by Traveloka, built as a set of Go microservices.
 
 - Four services behind an Nginx gateway, each with its own PostgreSQL database
 - Seats are never oversold: holds take seats in one conditional update, checked with 1,000 concurrent
   holds on a 100-seat flight
+- Hotel rooms are held for every night of a stay in one transaction, locking the nights in date order
+  so overlapping holds never deadlock or overbook
 - Events between services go through RabbitMQ with a transactional outbox and idempotent consumers
 - Flight search answers in 11 ms at p95 under 1,800 requests per second
 - Metrics, logs and a Grafana dashboard come up with `make up`
@@ -24,7 +26,7 @@ flowchart LR
 
     gateway --> auth & catalog & booking & payment
     catalog -. "seats held and sold" .-> booking
-    payment -. "booking to pay" .-> booking
+    payment -. "bill to pay" .-> booking
 
     subgraph data[Data]
         postgres[("PostgreSQL<br/>one database per service")]
@@ -50,13 +52,13 @@ flowchart LR
 | Service | Responsibility | API |
 |---|---|---|
 | `auth` | Users, registration, login, profile, JWT issuance | [openapi.yaml](services/auth/openapi.yaml) |
-| `catalog` | Flight data, search, admin inventory endpoints | [openapi.yaml](services/catalog/openapi.yaml) |
-| `booking` | Seat inventory, holds, booking lifecycle, admin analytics | [openapi.yaml](services/booking/openapi.yaml) |
-| `payment` | Mock payments, reports payment results to booking | [openapi.yaml](services/payment/openapi.yaml) |
+| `catalog` | Flight and hotel data, search, admin inventory endpoints | [openapi.yaml](services/catalog/openapi.yaml) |
+| `booking` | Seat and room-night inventory, holds, booking lifecycle, admin analytics | [openapi.yaml](services/booking/openapi.yaml) |
+| `payment` | Mock payments for flight and hotel bookings, reports payment results to booking | [openapi.yaml](services/payment/openapi.yaml) |
 
 No service reads another's database. A service calls another over HTTP when it needs an answer now,
 and otherwise keeps a copy fed by events. [docs/architecture.md](docs/architecture.md) has the event
-list, the booking and payment states, and the hold-and-pay sequence.
+list, the booking and payment states, the hold-and-pay sequence and the hotel hold.
 
 ## Scope
 
@@ -67,7 +69,14 @@ Phase 1 covers one-way, direct flights:
 - Seat reservation with a temporary hold, mock payment, then `CONFIRMED` or `EXPIRED`
 - Admin: flight and capacity management, booking analytics
 
-Round trips, multi-leg flights, seat maps, refunds and real payment gateways are out of scope.
+Phase 2 adds a minimal hotel flow:
+
+- Hotel search by city, check-in, check-out and guests, with a price filter, sorting and pagination
+- One room held for every night of a stay (up to 14 nights), mock payment, then `CONFIRMED` or `EXPIRED`
+- Admin: hotels with their room types, created once
+
+Round trips, multi-leg flights, seat maps, hotel updates, hotel analytics, refunds and real payment
+gateways are out of scope.
 
 ## How a booking works
 
@@ -80,6 +89,9 @@ Round trips, multi-leg flights, seat maps, refunds and real payment gateways are
 A payment can still arrive after its hold expired. Booking refuses it with `payment.rejected`, and
 payment marks it `REVERSED`.
 
+Hotel bookings follow the same steps with one room for every night of the stay. Payment reads a bill
+from booking that covers both kinds, so it does not need to know which one it charges.
+
 ## Non-functional requirements
 
 | Requirement | How | Evidence |
@@ -88,7 +100,7 @@ payment marks it `REVERSED`.
 | 99% uptime for booking | Healthcheck on every container and `restart: unless-stopped`; holds, expiry and events live in PostgreSQL, so a restart loses nothing | Uptime panel on the dashboard. One instance on one host, so a host failure is downtime |
 | Every API instrumented | Shared router middleware records requests, duration and in-flight requests per route; Go runtime metrics per service | `/metrics` on every service, scraped by Prometheus |
 | Passwords hashed with bcrypt | `auth` hashes on registration and compares on login | `services/auth` |
-| Booking conflicts prevented | Seats taken with a conditional update in the hold transaction; PostgreSQL, never Redis, is the source of truth | 1,000 concurrent holds, exactly 100 of 100 seats held ([load test](docs/load-test.md#concurrent-holds)) |
+| Booking conflicts prevented | Seats taken with a conditional update in the hold transaction; hotel nights locked in date order and taken in one transaction; PostgreSQL, never Redis, is the source of truth | 1,000 concurrent holds, exactly 100 of 100 seats held ([load test](docs/load-test.md#concurrent-holds)); concurrent overlapping hotel holds in the booking tests |
 | Caching | Redis route-day cache, 60 s, dropped on admin writes and seat changes; search falls back to PostgreSQL if Redis fails | Cache panels on the dashboard |
 | Monitoring | Prometheus and a provisioned Grafana dashboard | `deploy/grafana/` |
 | Logging | JSON logs with request IDs, shipped by Alloy to Loki | Warnings and errors panel |
@@ -100,7 +112,7 @@ Requirements: Docker with Compose v2, and `make`.
 ```sh
 cp .env.example .env   # adjust values if needed
 make up                # start the stack
-make seed              # create demo flights (see "Demo data")
+make seed              # create demo flights and hotels (see "Demo data")
 ```
 
 | URL | What |
@@ -114,18 +126,20 @@ Run `make` to list all targets.
 
 ### Demo data
 
-`make seed` fills the catalog with flights through the gateway, signed in as the admin account from
-`.env` (`ADMIN_EMAIL`, `ADMIN_PASSWORD`). It creates 14 days of flights starting tomorrow: 606 a day,
-8,484 in total, from 8 airlines on 12 routes. One busy route, CGK to DPS, has 300 flights a day for
-load testing.
+`make seed` fills the catalog with flights and hotels through the gateway, signed in as the admin
+account from `.env` (`ADMIN_EMAIL`, `ADMIN_PASSWORD`). It creates 14 days of flights starting tomorrow:
+606 a day, 8,484 in total, from 8 airlines on 12 routes. One busy route, CGK to DPS, has 300 flights a
+day for load testing. It also creates three hotels in each of the 11 cities, 33 in total with 77 room
+types.
 
-Running it again is safe: existing flights are skipped and never changed. To start from scratch, run
+Running it again is safe: existing flights and hotels are skipped and never changed. To start from scratch, run
 `make reset` (it deletes all volumes) and `make up` again. For the other options, run
 `go run ./tools/seed -h` with `ADMIN_EMAIL` and `ADMIN_PASSWORD` set.
 
 ### Try it
 
-Works in any POSIX shell, including Git Bash (on macOS use `date -v+1d +%F`):
+Works in any POSIX shell, including Git Bash (on macOS write `date -v+1d +%F` for `date -d tomorrow +%F`,
+and `date -v+7d +%F` for `date -d '+7 days' +%F`):
 
 ```sh
 API=http://localhost:8080/api/v1
@@ -150,6 +164,19 @@ curl -s -X POST $API/payments -H "$JSON" -H "Authorization: Bearer $TOKEN" -d "{
 # Booking confirms once the payment event arrives: HELD for a moment, then CONFIRMED
 sleep 1
 curl -s $API/bookings/$BOOKING -H "Authorization: Bearer $TOKEN" | field status
+
+# Hotels: two nights in Denpasar from next week; take the cheapest room type for 2 guests
+IN=$(date -d '+7 days' +%F); OUT=$(date -d '+9 days' +%F)
+ROOM=$(curl -s "$API/hotels?city=DPS&check_in=$IN&check_out=$OUT&guests=2&sort=price_asc" \
+  | grep -o '"room_types":\[{"id":"[^"]*"' | head -n1 | cut -d'"' -f6)
+
+# Hold the room for both nights, then pay it like a flight
+STAY=$(curl -s -X POST $API/hotel-bookings -H "$JSON" -H "Authorization: Bearer $TOKEN" \
+  -d "{\"room_type_id\":\"$ROOM\",\"check_in\":\"$IN\",\"check_out\":\"$OUT\",\"guests\":2,\"guest_name\":\"Jane Smith\"}" \
+  | field id)
+curl -s -X POST $API/payments -H "$JSON" -H "Authorization: Bearer $TOKEN" -d "{\"booking_id\":\"$STAY\"}"
+sleep 1
+curl -s $API/hotel-bookings/$STAY -H "Authorization: Bearer $TOKEN" | field status
 ```
 
 ### API gateway
@@ -160,8 +187,8 @@ Nginx is the only public entry point. Unknown paths return `404`, and every resp
 | Public path prefix | Service |
 |---|---|
 | `/api/v1/auth`, `/api/v1/users` | `auth` |
-| `/api/v1/flights`, `/api/v1/admin/flights` | `catalog` |
-| `/api/v1/bookings`, `/api/v1/admin/analytics/bookings` | `booking` |
+| `/api/v1/flights`, `/api/v1/admin/flights`, `/api/v1/hotels`, `/api/v1/admin/hotels` | `catalog` |
+| `/api/v1/bookings`, `/api/v1/hotel-bookings`, `/api/v1/admin/analytics/bookings` | `booking` |
 | `/api/v1/payments` | `payment` |
 
 `/internal/v1` paths, `/healthz` and `/metrics` are not exposed through the gateway.
