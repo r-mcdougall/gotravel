@@ -156,3 +156,20 @@ func (q *Queries) ReleaseRoomNights(ctx context.Context, arg ReleaseRoomNightsPa
 	_, err := q.db.Exec(ctx, releaseRoomNights, arg.RoomTypeID, arg.CheckIn, arg.CheckOut)
 	return err
 }
+
+const sellRoomNights = `-- name: SellRoomNights :exec
+UPDATE room_nights
+SET held_rooms = held_rooms - 1, sold_rooms = sold_rooms + 1, updated_at = now()
+WHERE room_type_id = $1 AND night >= $2 AND night < $3
+`
+
+type SellRoomNightsParams struct {
+	RoomTypeID string
+	CheckIn    time.Time
+	CheckOut   time.Time
+}
+
+func (q *Queries) SellRoomNights(ctx context.Context, arg SellRoomNightsParams) error {
+	_, err := q.db.Exec(ctx, sellRoomNights, arg.RoomTypeID, arg.CheckIn, arg.CheckOut)
+	return err
+}
