@@ -43,6 +43,37 @@ func (q *Queries) CancelHotelBooking(ctx context.Context, arg CancelHotelBooking
 	return i, err
 }
 
+const confirmHotelBooking = `-- name: ConfirmHotelBooking :one
+UPDATE hotel_bookings
+SET status = 'CONFIRMED', payment_id = $1::uuid, updated_at = now()
+WHERE id = $2 AND status = 'HELD'
+RETURNING id, room_type_id, check_in, check_out
+`
+
+type ConfirmHotelBookingParams struct {
+	PaymentID string
+	ID        string
+}
+
+type ConfirmHotelBookingRow struct {
+	ID         string
+	RoomTypeID string
+	CheckIn    time.Time
+	CheckOut   time.Time
+}
+
+func (q *Queries) ConfirmHotelBooking(ctx context.Context, arg ConfirmHotelBookingParams) (ConfirmHotelBookingRow, error) {
+	row := q.db.QueryRow(ctx, confirmHotelBooking, arg.PaymentID, arg.ID)
+	var i ConfirmHotelBookingRow
+	err := row.Scan(
+		&i.ID,
+		&i.RoomTypeID,
+		&i.CheckIn,
+		&i.CheckOut,
+	)
+	return i, err
+}
+
 const countHotelBookings = `-- name: CountHotelBookings :one
 SELECT count(*) FROM hotel_bookings WHERE user_id = $1
 `
@@ -177,6 +208,22 @@ func (q *Queries) GetHotelBooking(ctx context.Context, arg GetHotelBookingParams
 		&i.RoomType.PricePerNight,
 		&i.RoomType.CreatedAt,
 	)
+	return i, err
+}
+
+const getHotelBookingPayment = `-- name: GetHotelBookingPayment :one
+SELECT status, payment_id FROM hotel_bookings WHERE id = $1
+`
+
+type GetHotelBookingPaymentRow struct {
+	Status    string
+	PaymentID *string
+}
+
+func (q *Queries) GetHotelBookingPayment(ctx context.Context, id string) (GetHotelBookingPaymentRow, error) {
+	row := q.db.QueryRow(ctx, getHotelBookingPayment, id)
+	var i GetHotelBookingPaymentRow
+	err := row.Scan(&i.Status, &i.PaymentID)
 	return i, err
 }
 

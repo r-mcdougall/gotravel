@@ -372,6 +372,32 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /internal/v1/bills/{id}:
+    parameters:
+      - $ref: "#/components/parameters/BookingId"
+    get:
+      tags: [internal]
+      summary: Bill of a booking
+      description: >
+        What the payment service needs to charge a flight or hotel booking of
+        the signed-in user. Payment calls it with the paying user's own token.
+        It reports the booking in any status; payment decides whether it can be
+        paid.
+      operationId: getBill
+      responses:
+        "200":
+          description: The bill.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Bill"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /internal/v1/flights/{id}/seats:
     get:
       tags: [internal]
@@ -825,6 +851,26 @@ components:
           maxItems: 10
           items:
             $ref: "#/components/schemas/RouteSummary"
+
+    Bill:
+      type: object
+      required: [id, status, total_price, expires_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The id of a flight or hotel booking.
+        status:
+          $ref: "#/components/schemas/BookingStatus"
+        total_price:
+          type: integer
+          format: int64
+          description: The `total_price` of the booking in rupiah.
+          example: 4500000
+        expires_at:
+          type: string
+          format: date-time
+          description: When an unpaid hold expires.
 
     FlightSeats:
       type: object

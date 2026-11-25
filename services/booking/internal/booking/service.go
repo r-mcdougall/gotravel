@@ -43,6 +43,9 @@ type queries interface {
 	CountHotelBookings(ctx context.Context, userID string) (int64, error)
 	CancelHotelBooking(ctx context.Context, arg store.CancelHotelBookingParams) (store.HotelBooking, error)
 	ExpireHotelHold(ctx context.Context) (store.ExpireHotelHoldRow, error)
+	ConfirmHotelBooking(ctx context.Context, arg store.ConfirmHotelBookingParams) (store.ConfirmHotelBookingRow, error)
+	SellRoomNights(ctx context.Context, arg store.SellRoomNightsParams) error
+	GetHotelBookingPayment(ctx context.Context, id string) (store.GetHotelBookingPaymentRow, error)
 }
 
 var _ queries = (*store.Queries)(nil)

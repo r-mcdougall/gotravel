@@ -30,3 +30,8 @@ WHERE room_type_id = @room_type_id AND night >= @check_in AND night < @check_out
 UPDATE room_nights
 SET held_rooms = held_rooms - 1, updated_at = now()
 WHERE room_type_id = @room_type_id AND night >= @check_in AND night < @check_out;
+
+-- name: SellRoomNights :exec
+UPDATE room_nights
+SET held_rooms = held_rooms - 1, sold_rooms = sold_rooms + 1, updated_at = now()
+WHERE room_type_id = @room_type_id AND night >= @check_in AND night < @check_out;

@@ -109,6 +109,14 @@ type RoomTypeSummary struct {
 	Name string `json:"name"`
 }
 
+// Bill is what payment needs to charge a flight or hotel booking.
+type Bill struct {
+	ID         string    `json:"id"`
+	Status     string    `json:"status"`
+	TotalPrice int64     `json:"total_price"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
 type HotelBookingListResponse struct {
 	Data []HotelBookingResponse `json:"data"`
 	Meta PageMeta               `json:"meta"`

@@ -442,6 +442,7 @@ func TestRun_bookingEndpointsRequireAToken(t *testing.T) {
 		{http.MethodGet, "/api/v1/hotel-bookings"},
 		{http.MethodGet, "/api/v1/hotel-bookings/" + id},
 		{http.MethodPost, "/api/v1/hotel-bookings/" + id + "/cancel"},
+		{http.MethodGet, "/internal/v1/bills/" + id},
 	} {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
 			code, body := send(t, route.method, "http://"+addr+route.path, "", "")
@@ -789,6 +790,11 @@ func stayDate(offset int) string {
 func resetRoomType(t *testing.T, totalRooms int) {
 	t.Helper()
 	truncateBookingTables(t)
+	addRoomType(t, totalRooms)
+}
+
+func addRoomType(t *testing.T, totalRooms int) {
+	t.Helper()
 
 	conn, err := pgx.Connect(t.Context(), os.Getenv("DATABASE_URL"))
 	require.NoError(t, err)
@@ -1014,4 +1020,51 @@ func hotelBookingStatus(ctx context.Context, addr, token, id string) string {
 		return ""
 	}
 	return booking.Status
+}
+
+func TestRun_billsFlightAndHotelBookingsForPayment(t *testing.T) {
+	const flightID = "0b6f3f0e-6c0c-4c46-8f0b-3d6f1f0c9a11"
+	resetFlight(t, flightID, 3)
+	addRoomType(t, 5)
+	addr, stop := startService(t)
+	john, jane := signToken(t, johnID), signToken(t, janeID)
+
+	code, body := send(t, http.MethodPost, "http://"+addr+"/api/v1/bookings", john, fmt.Sprintf(`{"flight_id": %q, "passengers": [
+		{"full_name": "John Doe", "birth_date": "1990-05-17"},
+		{"full_name": "Jane Smith", "birth_date": "1992-08-03"}
+	]}`, flightID))
+	require.Equal(t, http.StatusCreated, code, body)
+	var flight struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &flight))
+
+	code, body = send(t, http.MethodPost, "http://"+addr+"/api/v1/hotel-bookings", john, hotelHoldBody(7, 10, 2))
+	require.Equal(t, http.StatusCreated, code, body)
+	var hotel struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &hotel))
+
+	for _, want := range []struct {
+		id    string
+		total float64
+	}{{flight.ID, 2_500_000}, {hotel.ID, 4_500_000}} {
+		code, body = send(t, http.MethodGet, "http://"+addr+"/internal/v1/bills/"+want.id, john, "")
+		require.Equal(t, http.StatusOK, code, body)
+
+		var bill map[string]any
+		require.NoError(t, json.Unmarshal([]byte(body), &bill))
+		require.Len(t, bill, 4, body)
+		require.Equal(t, want.id, bill["id"])
+		require.Equal(t, "HELD", bill["status"])
+		require.InDelta(t, want.total, bill["total_price"], 0)
+		require.NotEmpty(t, bill["expires_at"])
+
+		code, body = send(t, http.MethodGet, "http://"+addr+"/internal/v1/bills/"+want.id, jane, "")
+		require.Equal(t, http.StatusNotFound, code, body)
+		require.Equal(t, "NOT_FOUND", errorCode(t, body), "another user's booking has no bill for her")
+	}
+
+	require.NoError(t, stop())
 }

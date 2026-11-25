@@ -37,3 +37,12 @@ WHERE id = (
     FOR UPDATE SKIP LOCKED
 )
 RETURNING id, room_type_id, check_in, check_out;
+
+-- name: ConfirmHotelBooking :one
+UPDATE hotel_bookings
+SET status = 'CONFIRMED', payment_id = @payment_id::uuid, updated_at = now()
+WHERE id = @id AND status = 'HELD'
+RETURNING id, room_type_id, check_in, check_out;
+
+-- name: GetHotelBookingPayment :one
+SELECT status, payment_id FROM hotel_bookings WHERE id = @id;

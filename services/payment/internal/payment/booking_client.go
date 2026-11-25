@@ -26,11 +26,12 @@ func NewBookingClient(baseURL string) *BookingClient {
 	}
 }
 
-func (c *BookingClient) GetBooking(ctx context.Context, authorization, id string) (Booking, error) {
+// GetBill reads the bill of a flight or hotel booking with the paying user's own access token.
+func (c *BookingClient) GetBill(ctx context.Context, authorization, id string) (Bill, error) {
 	// The host comes from BOOKING_URL; the caller's id only reaches the path, escaped.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/bookings/"+url.PathEscape(id), nil) //nolint:gosec // G704: fixed host
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/internal/v1/bills/"+url.PathEscape(id), nil) //nolint:gosec // G704: fixed host
 	if err != nil {
-		return Booking{}, fmt.Errorf("build booking request: %w", err)
+		return Bill{}, fmt.Errorf("build booking request: %w", err)
 	}
 	req.Header.Set("Authorization", authorization)
 	if requestID := httpserver.RequestIDFrom(ctx); requestID != "" {
@@ -39,21 +40,21 @@ func (c *BookingClient) GetBooking(ctx context.Context, authorization, id string
 
 	resp, err := c.http.Do(req) //nolint:gosec // G704: fixed host
 	if err != nil {
-		return Booking{}, fmt.Errorf("%w: %w", ErrBookingUnavailable, err)
+		return Bill{}, fmt.Errorf("%w: %w", ErrBookingUnavailable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		return Booking{}, ErrBookingNotFound
+		return Bill{}, ErrBookingNotFound
 	default:
-		return Booking{}, fmt.Errorf("%w: booking answered %d", ErrBookingUnavailable, resp.StatusCode)
+		return Bill{}, fmt.Errorf("%w: booking answered %d", ErrBookingUnavailable, resp.StatusCode)
 	}
 
-	var booking Booking
-	if err := json.NewDecoder(resp.Body).Decode(&booking); err != nil {
-		return Booking{}, fmt.Errorf("%w: decode booking: %w", ErrBookingUnavailable, err)
+	var bill Bill
+	if err := json.NewDecoder(resp.Body).Decode(&bill); err != nil {
+		return Bill{}, fmt.Errorf("%w: decode bill: %w", ErrBookingUnavailable, err)
 	}
-	return booking, nil
+	return bill, nil
 }

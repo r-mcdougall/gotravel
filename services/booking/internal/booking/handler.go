@@ -25,6 +25,8 @@ type Service interface {
 	GetHotelBooking(ctx context.Context, userID, id string) (HotelBookingResponse, error)
 	ListHotelBookings(ctx context.Context, userID string, request ListRequest) (HotelBookingListResponse, error)
 	CancelHotelBooking(ctx context.Context, userID, id string) (HotelBookingResponse, error)
+
+	Bill(ctx context.Context, userID, id string) (Bill, error)
 }
 
 type Handler struct {
@@ -54,6 +56,9 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/api/v1/hotel-bookings", h.ListHotelBookings)
 		r.Get("/api/v1/hotel-bookings/{id}", h.GetHotelBooking)
 		r.Post("/api/v1/hotel-bookings/{id}/cancel", h.CancelHotelBooking)
+
+		// Internal: payment calls it with the paying user's token; the gateway does not route /internal.
+		r.Get("/internal/v1/bills/{id}", h.Bill)
 
 		r.Group(func(r chi.Router) {
 			r.Use(authn.RequireRole(authn.RoleAdmin))
@@ -184,6 +189,16 @@ func (h *Handler) GetHotelBooking(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) CancelHotelBooking(w http.ResponseWriter, r *http.Request) {
 	response, err := h.service.CancelHotelBooking(r.Context(), userID(r), chi.URLParam(r, "id"))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	httpserver.WriteJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) Bill(w http.ResponseWriter, r *http.Request) {
+	response, err := h.service.Bill(r.Context(), userID(r), chi.URLParam(r, "id"))
 	if err != nil {
 		h.writeError(w, r, err)
 		return

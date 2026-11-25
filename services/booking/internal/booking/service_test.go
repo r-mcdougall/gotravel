@@ -180,6 +180,21 @@ func (s unusedStore) ExpireHotelHold(context.Context) (store.ExpireHotelHoldRow,
 	return store.ExpireHotelHoldRow{}, nil
 }
 
+func (s unusedStore) ConfirmHotelBooking(context.Context, store.ConfirmHotelBookingParams) (store.ConfirmHotelBookingRow, error) {
+	s.fail("ConfirmHotelBooking")
+	return store.ConfirmHotelBookingRow{}, nil
+}
+
+func (s unusedStore) SellRoomNights(context.Context, store.SellRoomNightsParams) error {
+	s.fail("SellRoomNights")
+	return nil
+}
+
+func (s unusedStore) GetHotelBookingPayment(context.Context, string) (store.GetHotelBookingPaymentRow, error) {
+	s.fail("GetHotelBookingPayment")
+	return store.GetHotelBookingPaymentRow{}, nil
+}
+
 func (s unusedStore) InTx(context.Context, func(queries) error) error {
 	s.fail("InTx")
 	return nil
