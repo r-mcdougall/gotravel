@@ -24,8 +24,8 @@ type Response struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// Booking is what payment reads from the booking service before charging.
-type Booking struct {
+// Bill is what payment reads from the booking service before charging a flight or hotel booking.
+type Bill struct {
 	ID         string    `json:"id"`
 	Status     string    `json:"status"`
 	TotalPrice int64     `json:"total_price"`

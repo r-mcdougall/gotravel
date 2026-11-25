@@ -331,14 +331,14 @@ func truncatePaymentTables(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// startFakeBooking points BOOKING_URL at a booking service that shows ownerToken's
-// held and confirmed bookings and answers 404 for anything else.
+// startFakeBooking points BOOKING_URL at a booking service that bills ownerToken's
+// held and confirmed bookings and answers 404 for anything else, including other paths.
 func startFakeBooking(t *testing.T, ownerToken string) {
 	t.Helper()
 
 	statuses := map[string]string{heldBookingID: "HELD", confirmedBookingID: "CONFIRMED"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(r.URL.Path, "/api/v1/bookings/")
+		id := strings.TrimPrefix(r.URL.Path, "/internal/v1/bills/")
 		status, ok := statuses[id]
 		if !ok || r.Header.Get("Authorization") != "Bearer "+ownerToken {
 			w.WriteHeader(http.StatusNotFound)

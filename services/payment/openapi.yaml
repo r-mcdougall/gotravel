@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: GoTravel Payment API
-  version: 1.0.0
+  version: 1.1.0
   description: >
-    Mock payments for held bookings. No money moves: the client picks the
+    Mock payments for held flight and hotel bookings. No money moves: the client picks the
     outcome. Every route requires an access token issued by the auth service.
     A payment belongs to the user in the token; other users' payments are
     reported as not found. Times are in UTC.
@@ -25,8 +25,8 @@ paths:
       tags: [payments]
       summary: Pay for a booking
       description: >
-        Charges the total price of a `HELD` booking of the signed-in user whose
-        hold has not expired. A succeeded payment confirms the booking
+        Charges the total price of a `HELD` flight or hotel booking of the
+        signed-in user whose hold has not expired. A succeeded payment confirms the booking
         asynchronously, usually within a second. If the hold expired or was
         cancelled before the confirmation, the payment is reversed
         (`REVERSED`). A failed payment changes nothing and can be retried; a
@@ -50,7 +50,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
-          description: The signed-in user has no booking with this id.
+          description: The signed-in user has no flight or hotel booking with this id.
           content:
             application/json:
               schema:
@@ -176,6 +176,7 @@ components:
         booking_id:
           type: string
           format: uuid
+          description: The id of a flight or hotel booking.
         outcome:
           type: string
           enum: [succeeded, failed]
