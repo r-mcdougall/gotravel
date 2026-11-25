@@ -12,6 +12,9 @@ var (
 	ErrFlightNotFound = errors.New("flight not found")
 	ErrFlightDeparted = errors.New("flight has already departed")
 	ErrNotEnoughSeats = errors.New("not enough seats available")
+
+	ErrRoomTypeNotFound = errors.New("room type not found")
+	ErrRoomsUnavailable = errors.New("no room of this type is free on every night of the stay")
 )
 
 type ValidationError struct {

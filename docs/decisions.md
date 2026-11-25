@@ -172,7 +172,7 @@ Superseded by decision 33.
 
 ## 29. Payment reads the bill from booking with the caller's token
 
-- **Decision:** `POST /api/v1/payments` takes only a `booking_id`. Payment reads the booking from booking's public API with the caller's own `Authorization` header (2-second timeout), so booking checks ownership, and charges `total_price` only when the booking is `HELD` and `expires_at` is still ahead. The payment and its `payment.succeeded` event are written in one transaction.
+- **Decision:** `POST /api/v1/payments` takes only a `booking_id`. Payment reads the bill from booking (since decision 39 through `GET /internal/v1/bills/{id}`) with the caller's own `Authorization` header (2-second timeout), so booking checks ownership, and charges `total_price` only when the booking is `HELD` and `expires_at` is still ahead. The payment and its `payment.succeeded` event are written in one transaction.
 - **Rejected:** the amount in the request (a client could pay any amount); a copy of bookings in payment fed by events (a second consumer and table for one read); a service-to-service token (new auth machinery for one call).
 - **Trade-off:** payments need booking to be up; while it is not, payment answers 503 `BOOKING_UNAVAILABLE` and charges nothing. The deadline check uses payment's clock, and the booking can still expire before the confirmation arrives (decision 31).
 
@@ -184,7 +184,7 @@ Superseded by decision 33.
 
 ## 31. Bookings are confirmed by event; late payments are reversed
 
-- **Decision:** booking consumes `payment.succeeded` and, in one transaction, confirms a booking that is still `HELD`, stores the `payment_id` and moves its seats from held to sold. Free seats do not change, so no availability report is sent. The expirer and the confirmation lock the same row, so exactly one wins. A booking that is no longer held answers with `payment.rejected` (`booking_expired`, `booking_cancelled`, `booking_not_found` or `booking_paid_by_another_payment`), and payment marks that payment `REVERSED`. A repeated message for a booking confirmed by the same payment changes nothing.
+- **Decision:** booking consumes `payment.succeeded` and, in one transaction, confirms a booking that is still `HELD`, stores the `payment_id` and moves its seats from held to sold. Free seats do not change, so no availability report is sent. The expirer and the confirmation lock the same row, so exactly one wins. A booking that is no longer held answers with `payment.rejected` (`booking_expired`, `booking_cancelled`, `booking_not_found` or `booking_paid_by_another_payment`), and payment marks that payment `REVERSED`. A repeated message for a booking confirmed by the same payment changes nothing. Hotel bookings follow the same rules, with nights instead of seats (decision 39).
 - **Rejected:** payment calling booking to confirm synchronously (a charged payment would need its own retry when booking is down); refusing a confirmation after `expires_at` (a payment made in time would lose to delivery delay); a refund flow.
 - **Trade-off:** a paid booking stays `HELD` for the relay and consumer delay, about a second. A rejected payment shows `SUCCEEDED` until the reversal arrives, and nobody is notified of the reversal.
 
@@ -205,4 +205,31 @@ Superseded by decision 33.
 - **Decision:** k6 drives flight search through the gateway at a fixed arrival rate, steady and in steps, on the same laptop as the stack. Results are in `docs/load-test.md`: p95 11 ms at 1,800 req/s, peak about 2,700 req/s, no errors.
 - **Rejected:** tuning the connection pool or adding load shedding (the target holds with a wide margin); a separate load generator machine.
 - **Trade-off:** the numbers describe this laptop, not production, and vary between runs at high load. Past its peak, catalog queues requests without limit.
-  
+
+## 35. Hotels live in the existing services
+
+- **Decision:** a minimal hotel feature without a new service: hotels, room types and search in `catalog`; nightly room inventory and hotel bookings in `booking`; `payment` unchanged apart from reading a bill (decision 39). An admin creates a hotel with its room types once. There is no hotel update, cache, analytics, load test or availability report back to catalog.
+- **Rejected:** a hotel service (a fifth service, database, route and pipeline for three days of work); a generic inventory or product type shared by flights and hotels (one abstraction over two things that differ in almost everything).
+- **Trade-off:** booking holds two kinds of booking side by side, and the flight code was left as it was instead of being generalized.
+
+## 36. Hotels are found by city, without checking free rooms
+
+- **Decision:** a `cities` table with IATA city codes (JKT, DPS, TYO and others), filled by a migration like the airports (decision 14) and not linked to them. Search takes a city, a stay of at most 14 nights starting no earlier than today in UTC, and guests; it reads the city's room types with one query and filters, sorts and pages in Go (decision 15).
+- **Rejected:** `hotels.airport_code` (Jakarta has two airports); free-text cities; filtering by free rooms (search would read booking's inventory); a Redis cache.
+- **Trade-off:** a listed room type can be full when held (409 `ROOMS_UNAVAILABLE`). With "today" in UTC, a guest in Jakarta can still book the previous local day until 07:00.
+## 37. Room types are snapshots; inventory is one row per night
+
+- **Decision:** catalog publishes `room_type.created` per room type, without a version because room types never change; booking stores it with `ON CONFLICT DO NOTHING`. Nightly rows are created on first use. A hold locks the nights of the stay in date order and fails as a whole when one is full. A transaction touches the nights of one booking only, so the expirer takes one hold per transaction.
+- **Rejected:** one conditional `UPDATE` over the range (194 deadlocks in a 70-second test with sequential scans, none with ordered locks); rows created ahead for N days.
+- **Trade-off:** changing a room type means creating a new one. A check `held + sold <= total` is the last guard; tripping it means a bug and answers 500.
+## 38. Hotel bookings have their own table and expirer
+
+- **Decision:** `hotel_bookings` follows the booking lifecycle (decision 31) at `/api/v1/hotel-bookings`: hold, list, get and cancel. A booking is one room for a guest name and up to the room type's guest limit, with the price per night copied at hold time (decision 26); nights and total are computed, not stored. `HotelExpirer` runs next to the flight expirer, shares its loop and counts `booking_hotel_holds_expired_total`.
+- **Rejected:** one bookings table with a kind column and nullable flight or hotel fields; several rooms in one booking.
+- **Trade-off:** each kind has its own list and get routes, and admin analytics (decision 32) still covers flights only.
+
+## 39. Payment charges any booking through a bill
+
+- **Decision:** booking serves `GET /internal/v1/bills/{id}` to any role with the caller's token: `id`, `status`, `total_price` and `expires_at` of the user's flight or hotel booking. Payment reads it instead of the flight route (decision 29). `payment.succeeded` is unchanged: in one transaction booking confirms a held flight booking, else a held hotel booking (the booking row, then its nights), else rejects as in decision 31.
+- **Rejected:** payment trying two public routes; a kind in the bill and the event (payment would only hand it back); a queue per kind.
+- **Trade-off:** a hotel confirmation first misses the flight table. An id shared by both tables is not handled; both use `gen_random_uuid`.

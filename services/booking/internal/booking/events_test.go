@@ -2,10 +2,12 @@ package booking
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -238,7 +240,123 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	_, err = pool.Exec(t.Context(), "TRUNCATE passengers, bookings, outbox, flight_inventories")
+	_, err = pool.Exec(t.Context(), "TRUNCATE passengers, bookings, outbox, flight_inventories, hotel_bookings, room_nights, room_types")
 	require.NoError(t, err)
 	return pool
+}
+
+// roomTypeCreatedDelivery builds the message the catalog publishes for the test room type.
+func roomTypeCreatedDelivery(totalRooms int32, pricePerNight int64) messaging.Delivery {
+	body := fmt.Sprintf(`{
+		"event_id": "9b2d4f61-3a7c-4e15-8d2b-6c0e1f3a5b7d",
+		"type": "room_type.created",
+		"occurred_at": "2026-11-23T10:00:00Z",
+		"data": {
+			"room_type_id": %q, "hotel_id": %q,
+			"hotel_name": "Seminyak Garden Hotel", "city_code": "DPS",
+			"name": "Deluxe King", "max_guests": 2,
+			"total_rooms": %d, "price_per_night": %d
+		}
+	}`, testRoomTypeID, testHotelID, totalRooms, pricePerNight)
+
+	return messaging.Delivery{ID: "9b2d4f61-3a7c-4e15-8d2b-6c0e1f3a5b7d", Type: eventRoomTypeCreated, Body: []byte(body)}
+}
+
+func TestEventHandlerHandleRoomTypeCreated_storesTheRoomTypeOnce(t *testing.T) {
+	pool := newTestPool(t)
+	handler := NewEventHandler(NewPgStore(pool))
+
+	require.NoError(t, handler.HandleRoomTypeCreated(t.Context(), roomTypeCreatedDelivery(12, 1_500_000)))
+	require.NoError(t, handler.HandleRoomTypeCreated(t.Context(), roomTypeCreatedDelivery(1, 1)), "a repeated message is acked")
+
+	roomType, err := store.New(pool).GetRoomType(t.Context(), testRoomTypeID)
+	require.NoError(t, err)
+	roomType.CreatedAt = time.Time{}
+	require.Equal(t, store.RoomType{
+		RoomTypeID:    testRoomTypeID,
+		HotelID:       testHotelID,
+		HotelName:     "Seminyak Garden Hotel",
+		CityCode:      "DPS",
+		Name:          "Deluxe King",
+		MaxGuests:     2,
+		TotalRooms:    12,
+		PricePerNight: 1_500_000,
+	}, roomType, "the first message wins")
+	require.Equal(t, 1, count(t, pool, "room_types"))
+}
+
+func TestEventHandlerHandleRoomTypeCreated_rejectsAMessageThatIsNotJSON(t *testing.T) {
+	handler := NewEventHandler(unusedStore{t})
+
+	err := handler.HandleRoomTypeCreated(t.Context(), messaging.Delivery{ID: "m1", Body: []byte("not json")})
+
+	require.ErrorIs(t, err, messaging.ErrPermanent)
+}
+
+func TestEventHandlerHandleRoomTypeCreated_rejectsARoomTypeBookingCannotHold(t *testing.T) {
+	for _, tc := range []struct{ field, value string }{
+		{"room_type_id", `"not-a-uuid"`},
+		{"hotel_id", `""`},
+		{"hotel_name", `""`},
+		{"city_code", `""`},
+		{"name", `""`},
+		{"max_guests", `0`},
+		{"max_guests", `11`},
+		{"total_rooms", `0`},
+		{"price_per_night", `0`},
+	} {
+		field, value := tc.field, tc.value
+		t.Run(field+"="+value, func(t *testing.T) {
+			var event, data map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(roomTypeCreatedDelivery(12, 1_500_000).Body, &event))
+			require.NoError(t, json.Unmarshal(event["data"], &data))
+			data[field] = json.RawMessage(value)
+			var err error
+			event["data"], err = json.Marshal(data)
+			require.NoError(t, err)
+			body, err := json.Marshal(event)
+			require.NoError(t, err)
+			handler := NewEventHandler(unusedStore{t})
+
+			err = handler.HandleRoomTypeCreated(t.Context(), messaging.Delivery{ID: "m1", Body: body})
+
+			require.ErrorIs(t, err, messaging.ErrPermanent)
+			require.ErrorContains(t, err, "invalid "+field)
+		})
+	}
+}
+
+func TestEventHandlerHandleRoomTypeCreated_acceptsTheLimitsOfARoomType(t *testing.T) {
+	var got store.InsertRoomTypeParams
+	handler := NewEventHandler(roomTypeRecorder{unusedStore: unusedStore{t}, insert: func(arg store.InsertRoomTypeParams) error {
+		got = arg
+		return nil
+	}})
+
+	body := strings.Replace(string(roomTypeCreatedDelivery(1, 1).Body), `"max_guests": 2`, `"max_guests": 10`, 1)
+	require.NoError(t, handler.HandleRoomTypeCreated(t.Context(), messaging.Delivery{ID: "m1", Body: []byte(body)}))
+
+	require.Equal(t, int32(10), got.MaxGuests)
+	require.Equal(t, int32(1), got.TotalRooms)
+	require.Equal(t, int64(1), got.PricePerNight)
+}
+
+func TestEventHandlerHandleRoomTypeCreated_treatsStoreFailuresAsTemporary(t *testing.T) {
+	handler := NewEventHandler(roomTypeRecorder{unusedStore: unusedStore{t}, insert: func(store.InsertRoomTypeParams) error {
+		return errors.New("database unavailable")
+	}})
+
+	err := handler.HandleRoomTypeCreated(t.Context(), roomTypeCreatedDelivery(12, 1_500_000))
+
+	require.ErrorContains(t, err, "database unavailable")
+	require.NotErrorIs(t, err, messaging.ErrPermanent)
+}
+
+type roomTypeRecorder struct {
+	unusedStore
+	insert func(arg store.InsertRoomTypeParams) error
+}
+
+func (s roomTypeRecorder) InsertRoomType(_ context.Context, arg store.InsertRoomTypeParams) error {
+	return s.insert(arg)
 }

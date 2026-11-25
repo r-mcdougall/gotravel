@@ -70,29 +70,29 @@ func (s unusedStore) InTx(context.Context, func(queries) error) error {
 	return nil
 }
 
-// fakeBookings answers with get; a nil get fails the test.
-type fakeBookings struct {
+// fakeBills answers with get; a nil get fails the test.
+type fakeBills struct {
 	t   *testing.T
-	get func(authorization, id string) (Booking, error)
+	get func(authorization, id string) (Bill, error)
 }
 
-func (f fakeBookings) GetBooking(_ context.Context, authorization, id string) (Booking, error) {
+func (f fakeBills) GetBill(_ context.Context, authorization, id string) (Bill, error) {
 	if f.get == nil {
-		f.t.Fatal("unexpected call to GetBooking")
+		f.t.Fatal("unexpected call to GetBill")
 	}
 	return f.get(authorization, id)
 }
 
-// heldBooking returns a booking that can be paid until expiresAt.
-func heldBooking(t *testing.T, expiresAt time.Time) fakeBookings {
-	return fakeBookings{t: t, get: func(authorization, id string) (Booking, error) {
+// heldBill returns the bill of a booking that can be paid until expiresAt.
+func heldBill(t *testing.T, expiresAt time.Time) fakeBills {
+	return fakeBills{t: t, get: func(authorization, id string) (Bill, error) {
 		require.Equal(t, johnToken, authorization)
-		return Booking{ID: id, Status: "HELD", TotalPrice: 2_500_000, ExpiresAt: expiresAt}, nil
+		return Bill{ID: id, Status: "HELD", TotalPrice: 2_500_000, ExpiresAt: expiresAt}, nil
 	}}
 }
 
-func TestServicePay_rejectsAnInvalidRequestBeforeAskingBooking(t *testing.T) {
-	svc := newService(unusedStore{t}, fakeBookings{t: t}, time.Now)
+func TestServicePay_rejectsAnInvalidRequestBeforeAskingForTheBill(t *testing.T) {
+	svc := newService(unusedStore{t}, fakeBills{t: t}, time.Now)
 
 	_, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: "not-a-uuid"})
 
@@ -104,19 +104,19 @@ func TestServicePay_rejectsAnInvalidRequestBeforeAskingBooking(t *testing.T) {
 func TestServicePay_refusesABookingThatCannotBePaid(t *testing.T) {
 	now := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name    string
-		booking Booking
+		name string
+		bill Bill
 	}{
-		{name: "confirmed", booking: Booking{Status: "CONFIRMED", ExpiresAt: now.Add(time.Minute)}},
-		{name: "expired", booking: Booking{Status: "EXPIRED", ExpiresAt: now.Add(-time.Minute)}},
-		{name: "cancelled", booking: Booking{Status: "CANCELLED", ExpiresAt: now.Add(time.Minute)}},
-		{name: "held but past its expiry", booking: Booking{Status: "HELD", ExpiresAt: now}},
+		{name: "confirmed", bill: Bill{Status: "CONFIRMED", ExpiresAt: now.Add(time.Minute)}},
+		{name: "expired", bill: Bill{Status: "EXPIRED", ExpiresAt: now.Add(-time.Minute)}},
+		{name: "cancelled", bill: Bill{Status: "CANCELLED", ExpiresAt: now.Add(time.Minute)}},
+		{name: "held but past its expiry", bill: Bill{Status: "HELD", ExpiresAt: now}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bookings := fakeBookings{t: t, get: func(string, string) (Booking, error) { return tt.booking, nil }}
-			svc := newService(unusedStore{t}, bookings, func() time.Time { return now })
+			bills := fakeBills{t: t, get: func(string, string) (Bill, error) { return tt.bill, nil }}
+			svc := newService(unusedStore{t}, bills, func() time.Time { return now })
 
 			_, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: testBookingID})
 
@@ -127,8 +127,8 @@ func TestServicePay_refusesABookingThatCannotBePaid(t *testing.T) {
 
 func TestServicePay_passesOnWhatBookingAnswered(t *testing.T) {
 	for _, want := range []error{ErrBookingNotFound, ErrBookingUnavailable} {
-		bookings := fakeBookings{t: t, get: func(string, string) (Booking, error) { return Booking{}, want }}
-		svc := newService(unusedStore{t}, bookings, time.Now)
+		bills := fakeBills{t: t, get: func(string, string) (Bill, error) { return Bill{}, want }}
+		svc := newService(unusedStore{t}, bills, time.Now)
 
 		_, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: testBookingID})
 
@@ -137,7 +137,7 @@ func TestServicePay_passesOnWhatBookingAnswered(t *testing.T) {
 }
 
 func TestServiceGetPayment_treatsAMalformedIDAsNotFound(t *testing.T) {
-	svc := newService(unusedStore{t}, fakeBookings{t: t}, time.Now)
+	svc := newService(unusedStore{t}, fakeBills{t: t}, time.Now)
 
 	_, err := svc.GetPayment(t.Context(), johnID, "not-a-uuid")
 
@@ -147,7 +147,7 @@ func TestServiceGetPayment_treatsAMalformedIDAsNotFound(t *testing.T) {
 func TestServicePay_chargesTheBookingAndAnnouncesTheSuccess(t *testing.T) {
 	pool := newTestPool(t)
 	now := time.Now().UTC()
-	svc := newService(NewPgStore(pool), heldBooking(t, now.Add(15*time.Minute)), func() time.Time { return now })
+	svc := newService(NewPgStore(pool), heldBill(t, now.Add(15*time.Minute)), func() time.Time { return now })
 
 	paid, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: testBookingID})
 	require.NoError(t, err)
@@ -165,7 +165,7 @@ func TestServicePay_chargesTheBookingAndAnnouncesTheSuccess(t *testing.T) {
 func TestServicePay_recordsAFailedPaymentWithoutAnnouncingIt(t *testing.T) {
 	pool := newTestPool(t)
 	now := time.Now().UTC()
-	svc := newService(NewPgStore(pool), heldBooking(t, now.Add(15*time.Minute)), func() time.Time { return now })
+	svc := newService(NewPgStore(pool), heldBill(t, now.Add(15*time.Minute)), func() time.Time { return now })
 
 	failed, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: testBookingID, Outcome: "failed"})
 	require.NoError(t, err)
@@ -181,7 +181,7 @@ func TestServicePay_recordsAFailedPaymentWithoutAnnouncingIt(t *testing.T) {
 func TestServicePay_refusesASecondSuccessfulPayment(t *testing.T) {
 	pool := newTestPool(t)
 	now := time.Now().UTC()
-	svc := newService(NewPgStore(pool), heldBooking(t, now.Add(15*time.Minute)), func() time.Time { return now })
+	svc := newService(NewPgStore(pool), heldBill(t, now.Add(15*time.Minute)), func() time.Time { return now })
 
 	_, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: testBookingID})
 	require.NoError(t, err)
@@ -195,7 +195,7 @@ func TestServicePay_refusesASecondSuccessfulPayment(t *testing.T) {
 func TestServicePay_neverChargesABookingTwiceAtTheSameTime(t *testing.T) {
 	pool := newTestPool(t)
 	now := time.Now().UTC()
-	svc := newService(NewPgStore(pool), heldBooking(t, now.Add(15*time.Minute)), func() time.Time { return now })
+	svc := newService(NewPgStore(pool), heldBill(t, now.Add(15*time.Minute)), func() time.Time { return now })
 
 	const attempts = 10
 	errs := make(chan error, attempts)
@@ -227,7 +227,7 @@ func TestServicePay_neverChargesABookingTwiceAtTheSameTime(t *testing.T) {
 func TestServiceGetPayment_hidesPaymentsOfOtherUsers(t *testing.T) {
 	pool := newTestPool(t)
 	now := time.Now().UTC()
-	svc := newService(NewPgStore(pool), heldBooking(t, now.Add(15*time.Minute)), func() time.Time { return now })
+	svc := newService(NewPgStore(pool), heldBill(t, now.Add(15*time.Minute)), func() time.Time { return now })
 
 	paid, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: testBookingID})
 	require.NoError(t, err)
@@ -243,7 +243,7 @@ func TestServicePay_doesNotCommitAPaymentWhoseEventCannotBeRecorded(t *testing.T
 	pool := newTestPool(t)
 	now := time.Now().UTC()
 	db := failingOutboxStore{NewPgStore(pool)}
-	svc := newService(db, heldBooking(t, now.Add(15*time.Minute)), func() time.Time { return now })
+	svc := newService(db, heldBill(t, now.Add(15*time.Minute)), func() time.Time { return now })
 
 	_, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: testBookingID})
 

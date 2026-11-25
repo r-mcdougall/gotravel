@@ -30,6 +30,50 @@ func (r *HoldRequest) Validate() error {
 	return v.err()
 }
 
+func (r *HotelHoldRequest) Validate() error {
+	var v ValidationError
+
+	v.check(validUUID(r.RoomTypeID), "room_type_id", "must be a UUID")
+
+	checkIn, checkInErr := time.Parse(time.DateOnly, r.CheckIn)
+	checkOut, checkOutErr := time.Parse(time.DateOnly, r.CheckOut)
+	v.check(checkInErr == nil, "check_in", "must be a date in YYYY-MM-DD format")
+	v.check(checkOutErr == nil, "check_out", "must be a date in YYYY-MM-DD format")
+	if checkInErr == nil && checkOutErr == nil {
+		v.check(checkOut.After(checkIn), "check_out", "must be after check_in")
+		v.check(nights(checkIn, checkOut) <= maxNights, "check_out", fmt.Sprintf("must be at most %d nights after check_in", maxNights))
+	}
+
+	v.check(r.Guests >= 1 && r.Guests <= maxGuests, "guests", fmt.Sprintf("must be between 1 and %d", maxGuests))
+	nameLen := utf8.RuneCountInString(r.GuestName)
+	v.check(nameLen >= 1 && nameLen <= maxFullNameLen, "guest_name", fmt.Sprintf("must be between 1 and %d characters", maxFullNameLen))
+
+	return v.err()
+}
+
+// stay returns the dates of a request that passed Validate, as midnight UTC.
+func (r *HotelHoldRequest) stay() (checkIn, checkOut time.Time) {
+	checkIn, _ = time.Parse(time.DateOnly, r.CheckIn)
+	checkOut, _ = time.Parse(time.DateOnly, r.CheckOut)
+	return checkIn, checkOut
+}
+
+// nights is the length of a stay whose dates are both midnight UTC.
+func nights(checkIn, checkOut time.Time) int64 {
+	return int64(checkOut.Sub(checkIn) / (24 * time.Hour))
+}
+
+// checkCheckIn rejects a stay that starts before today. Today is the UTC date, so east of UTC a check-in
+// on the local yesterday still passes for a few hours after local midnight.
+func checkCheckIn(checkIn, now time.Time) error {
+	year, month, day := now.UTC().Date()
+	today := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+
+	var v ValidationError
+	v.check(!checkIn.Before(today), "check_in", "must not be in the past")
+	return v.err()
+}
+
 func (r ListRequest) Validate() error {
 	var v ValidationError
 
@@ -72,6 +116,13 @@ func (r *HoldRequest) normalize() {
 		r.Passengers[i].FullName = strings.TrimSpace(r.Passengers[i].FullName)
 		r.Passengers[i].BirthDate = strings.TrimSpace(r.Passengers[i].BirthDate)
 	}
+}
+
+func (r *HotelHoldRequest) normalize() {
+	r.RoomTypeID = strings.TrimSpace(r.RoomTypeID)
+	r.CheckIn = strings.TrimSpace(r.CheckIn)
+	r.CheckOut = strings.TrimSpace(r.CheckOut)
+	r.GuestName = strings.TrimSpace(r.GuestName)
 }
 
 func validUUID(s string) bool {

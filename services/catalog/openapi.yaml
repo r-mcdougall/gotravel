@@ -1,17 +1,19 @@
 openapi: 3.1.0
 info:
   title: GoTravel Catalog API
-  version: 1.0.0
+  version: 1.1.0
   description: >
-    Flight search and detail are public. Flight inventory management lives
-    under `/api/v1/admin` and requires an access token issued by the auth
-    service for a user with role `admin`.
+    Flight search, flight detail and hotel search are public. Flight and
+    hotel inventory management lives under `/api/v1/admin` and requires an
+    access token issued by the auth service for a user with role `admin`.
 
 tags:
   - name: flights
     description: Public flight search.
+  - name: hotels
+    description: Public hotel search.
   - name: admin
-    description: Flight inventory management.
+    description: Flight and hotel inventory management.
 
 servers:
   - url: http://localhost:8080
@@ -348,6 +350,144 @@ paths:
                   code: BOOKING_UNAVAILABLE
                   message: the booking service is unavailable, try again later
 
+  /api/v1/hotels:
+    get:
+      tags: [hotels]
+      summary: Search hotels
+      description: >
+        Returns the hotels in `city` that have at least one room type for
+        `guests`, one hotel per item with the matching room types inside,
+        cheapest first. One booking is one room. The search does not check
+        which rooms are free on the nights asked for; a hold is what finally
+        reserves a room. A city with no hotels gives an empty list.
+      operationId: searchHotels
+      security: []
+      parameters:
+        - name: city
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/CityCode"
+        - name: check_in
+          in: query
+          required: true
+          description: >
+            First night of the stay, a date at the hotel. Must not be before
+            today's date in UTC.
+          schema:
+            type: string
+            format: date
+          example: "2026-12-01"
+        - name: check_out
+          in: query
+          required: true
+          description: Day of departure; after `check_in` and at most 14 nights later.
+          schema:
+            type: string
+            format: date
+          example: "2026-12-03"
+        - name: guests
+          in: query
+          description: Only room types for at least this many guests.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 1
+        - name: min_price
+          in: query
+          description: Lowest price per night in rupiah; applies to each room type.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: max_price
+          in: query
+          description: Highest price per night in rupiah; not below `min_price`.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: sort
+          in: query
+          description: >
+            Orders hotels by their lowest price per night. Hotels that tie are
+            ordered by name, then by id.
+          schema:
+            type: string
+            enum: [price_asc, price_desc]
+            default: price_asc
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000000
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: A page of hotels.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HotelList"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/hotels:
+    post:
+      tags: [admin]
+      summary: Create a hotel with its room types
+      description: >
+        Hotels cannot be changed once created. Leading and trailing spaces are
+        removed from every text. A room type field is reported in validation
+        details by its position, for example `room_types[1].max_guests`.
+        Creating a hotel also records one `room_type.created` event per room
+        type for the booking service, which keeps the room inventory.
+      operationId: adminCreateHotel
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateHotelRequest"
+      responses:
+        "201":
+          description: Hotel created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminHotel"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A hotel with the same name already exists in the city.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: HOTEL_EXISTS
+                  message: hotel already exists in this city
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -431,6 +571,14 @@ components:
       pattern: "^[A-Z0-9]{2}$"
       description: IATA airline code, upper case.
       example: GA
+
+    CityCode:
+      type: string
+      pattern: "^[A-Z]{3}$"
+      description: >
+        IATA city code, upper case. It can differ from the city's airport
+        code: Jakarta is JKT, its airport CGK.
+      example: DPS
 
     TimeOfDay:
       type: string
@@ -614,7 +762,7 @@ components:
           type: integer
         total:
           type: integer
-          description: Number of flights matching the filters across all pages.
+          description: Number of flights or hotels matching the filters across all pages.
 
     FlightList:
       type: object
@@ -638,6 +786,191 @@ components:
         meta:
           $ref: "#/components/schemas/PageMeta"
 
+    CreateHotelRequest:
+      type: object
+      additionalProperties: false
+      required: [name, city_code, address, star_rating, room_types]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Unique within the city.
+          example: Seminyak Garden Hotel
+        city_code:
+          $ref: "#/components/schemas/CityCode"
+        address:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: Jl. Raya Seminyak 12, Badung
+        star_rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 4
+        room_types:
+          type: array
+          minItems: 1
+          maxItems: 10
+          description: Room type names must be unique within the hotel.
+          items:
+            $ref: "#/components/schemas/CreateRoomTypeRequest"
+
+    CreateRoomTypeRequest:
+      type: object
+      additionalProperties: false
+      required: [name, max_guests, total_rooms, price_per_night]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: Deluxe Double
+        max_guests:
+          type: integer
+          minimum: 1
+          maximum: 10
+          example: 2
+        total_rooms:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: Rooms of this type the hotel has each night.
+          example: 20
+        price_per_night:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Price of one room for one night in rupiah.
+          example: 850000
+
+    City:
+      type: object
+      required: [code, name]
+      properties:
+        code:
+          $ref: "#/components/schemas/CityCode"
+        name:
+          type: string
+          example: Denpasar
+
+    AdminRoomType:
+      type: object
+      required: [id, name, max_guests, total_rooms, price_per_night]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Deluxe Double
+        max_guests:
+          type: integer
+          example: 2
+        total_rooms:
+          type: integer
+          example: 20
+        price_per_night:
+          type: integer
+          format: int64
+          example: 850000
+
+    AdminHotel:
+      type: object
+      required: [id, name, city, address, star_rating, room_types, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Seminyak Garden Hotel
+        city:
+          $ref: "#/components/schemas/City"
+        address:
+          type: string
+          example: Jl. Raya Seminyak 12, Badung
+        star_rating:
+          type: integer
+          example: 4
+        room_types:
+          type: array
+          description: In the order they were sent.
+          items:
+            $ref: "#/components/schemas/AdminRoomType"
+        created_at:
+          type: string
+          format: date-time
+
+    RoomType:
+      type: object
+      required: [id, name, max_guests, price_per_night, total_price]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The id to hold a room of this type with.
+        name:
+          type: string
+          example: Deluxe Double
+        max_guests:
+          type: integer
+          example: 2
+        price_per_night:
+          type: integer
+          format: int64
+          description: Price of one room for one night in rupiah.
+          example: 850000
+        total_price:
+          type: integer
+          format: int64
+          description: "`price_per_night` times the nights from `check_in` to `check_out`."
+          example: 1700000
+
+    Hotel:
+      type: object
+      required: [id, name, city, address, star_rating, lowest_price_per_night, room_types]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Seminyak Garden Hotel
+        city:
+          $ref: "#/components/schemas/City"
+        address:
+          type: string
+          example: Jl. Raya Seminyak 12, Badung
+        star_rating:
+          type: integer
+          example: 4
+        lowest_price_per_night:
+          type: integer
+          format: int64
+          description: Price per night of the cheapest room type listed.
+          example: 850000
+        room_types:
+          type: array
+          description: >
+            Only the room types for the guests and the price range, cheapest
+            first. Never empty.
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RoomType"
+
+    HotelList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Hotel"
+        meta:
+          $ref: "#/components/schemas/PageMeta"
+
     Error:
       type: object
       required: [error]
@@ -651,6 +984,7 @@ components:
               enum:
                 - VALIDATION_ERROR
                 - FLIGHT_EXISTS
+                - HOTEL_EXISTS
                 - CAPACITY_BELOW_SOLD
                 - BOOKING_UNAVAILABLE
                 - UNAUTHORIZED

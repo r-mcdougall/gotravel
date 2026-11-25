@@ -31,22 +31,22 @@ type paymentStore interface {
 	InTx(ctx context.Context, fn func(queries) error) error
 }
 
-type bookingReader interface {
-	GetBooking(ctx context.Context, authorization, id string) (Booking, error)
+type billReader interface {
+	GetBill(ctx context.Context, authorization, id string) (Bill, error)
 }
 
 type service struct {
-	db       paymentStore
-	bookings bookingReader
-	now      func() time.Time
+	db    paymentStore
+	bills billReader
+	now   func() time.Time
 }
 
-func NewService(db paymentStore, bookings bookingReader) Service {
-	return newService(db, bookings, time.Now)
+func NewService(db paymentStore, bills billReader) Service {
+	return newService(db, bills, time.Now)
 }
 
-func newService(db paymentStore, bookings bookingReader, now func() time.Time) *service {
-	return &service{db: db, bookings: bookings, now: now}
+func newService(db paymentStore, bills billReader, now func() time.Time) *service {
+	return &service{db: db, bills: bills, now: now}
 }
 
 func (s *service) Pay(ctx context.Context, userID, authorization string, request PayRequest) (Response, error) {
@@ -55,11 +55,11 @@ func (s *service) Pay(ctx context.Context, userID, authorization string, request
 		return Response{}, fmt.Errorf("validate request: %w", err)
 	}
 
-	booking, err := s.bookings.GetBooking(ctx, authorization, request.BookingID)
+	bill, err := s.bills.GetBill(ctx, authorization, request.BookingID)
 	if err != nil {
-		return Response{}, fmt.Errorf("get booking: %w", err)
+		return Response{}, fmt.Errorf("get bill: %w", err)
 	}
-	if booking.Status != bookingHeld || !booking.ExpiresAt.After(s.now()) {
+	if bill.Status != bookingHeld || !bill.ExpiresAt.After(s.now()) {
 		return Response{}, ErrBookingNotPayable
 	}
 
@@ -72,9 +72,9 @@ func (s *service) Pay(ctx context.Context, userID, authorization string, request
 	err = s.db.InTx(ctx, func(q queries) error {
 		var err error
 		payment, err = q.CreatePayment(ctx, store.CreatePaymentParams{
-			BookingID: booking.ID,
+			BookingID: bill.ID,
 			UserID:    userID,
-			Amount:    booking.TotalPrice,
+			Amount:    bill.TotalPrice,
 			Status:    status,
 		})
 		if isSecondSuccess(err) {

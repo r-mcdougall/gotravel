@@ -37,7 +37,7 @@ func TestEventHandlerHandlePaymentRejected_rejectsAMessageItCanNeverApply(t *tes
 func TestEventHandlerHandlePaymentRejected_reversesTheSucceededPayment(t *testing.T) {
 	pool := newTestPool(t)
 	now := time.Now().UTC()
-	svc := newService(NewPgStore(pool), heldBooking(t, now.Add(15*time.Minute)), func() time.Time { return now })
+	svc := newService(NewPgStore(pool), heldBill(t, now.Add(15*time.Minute)), func() time.Time { return now })
 	paid, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: testBookingID})
 	require.NoError(t, err)
 	handler := NewEventHandler(NewPgStore(pool))
@@ -61,7 +61,7 @@ func TestEventHandlerHandlePaymentRejected_reversesTheSucceededPayment(t *testin
 func TestEventHandlerHandlePaymentRejected_leavesAFailedPaymentAlone(t *testing.T) {
 	pool := newTestPool(t)
 	now := time.Now().UTC()
-	svc := newService(NewPgStore(pool), heldBooking(t, now.Add(15*time.Minute)), func() time.Time { return now })
+	svc := newService(NewPgStore(pool), heldBill(t, now.Add(15*time.Minute)), func() time.Time { return now })
 	failed, err := svc.Pay(t.Context(), johnID, johnToken, PayRequest{BookingID: testBookingID, Outcome: "failed"})
 	require.NoError(t, err)
 

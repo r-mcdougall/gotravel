@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeAPI is the part of the platform the seed talks to: a login and an admin
-// endpoint that creates flights and refuses duplicates.
+// fakeAPI is the part of the platform the seed talks to: a login and admin
+// endpoints that create flights and hotels and refuse duplicates.
 type fakeAPI struct {
 	server *httptest.Server
 
@@ -23,7 +23,7 @@ type fakeAPI struct {
 	logins      []map[string]string
 	requests    int
 	flights     map[string]flightSpec
-	failCreates bool
+	failCreates bool // flights only
 	rejectLogin bool
 	onCreate    func(created int) // called after each stored flight, under no lock
 
@@ -32,11 +32,15 @@ type fakeAPI struct {
 	createDelay time.Duration
 	inFlight    int
 	maxInFlight int
+
+	hotels        map[string]hotelSpec
+	hotelRequests int
+	failHotels    bool
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
 	t.Helper()
-	api := &fakeAPI{flights: make(map[string]flightSpec)}
+	api := &fakeAPI{flights: make(map[string]flightSpec), hotels: make(map[string]hotelSpec)}
 	api.server = httptest.NewServer(http.HandlerFunc(api.serve))
 	t.Cleanup(api.server.Close)
 	return api
@@ -62,6 +66,8 @@ func (a *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, `{"access_token":"admin-token"}`)
 	case createFlightPath:
 		a.create(w, r)
+	case createHotelPath:
+		a.createHotel(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -103,6 +109,54 @@ func (a *fakeAPI) create(w http.ResponseWriter, r *http.Request) {
 		a.onCreate(stored)
 	}
 	writeJSON(w, http.StatusCreated, `{}`)
+}
+
+func (a *fakeAPI) createHotel(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Authorization") != "Bearer admin-token" {
+		writeJSON(w, http.StatusUnauthorized, `{"error":{"code":"UNAUTHORIZED","message":"missing token"}}`)
+		return
+	}
+
+	a.mu.Lock()
+	a.hotelRequests++
+	failing := a.failHotels
+	a.mu.Unlock()
+	if failing {
+		writeJSON(w, http.StatusInternalServerError, `{"error":{"code":"INTERNAL_ERROR","message":"internal server error"}}`)
+		return
+	}
+
+	var spec hotelSpec
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+		writeJSON(w, http.StatusBadRequest, `{"error":{"code":"VALIDATION_ERROR","message":"invalid request body"}}`)
+		return
+	}
+	key := spec.CityCode + "/" + spec.Name
+
+	a.mu.Lock()
+	_, exists := a.hotels[key]
+	if !exists {
+		a.hotels[key] = spec
+	}
+	a.mu.Unlock()
+
+	if exists {
+		writeJSON(w, http.StatusConflict, `{"error":{"code":"HOTEL_EXISTS","message":"hotel already exists in this city"}}`)
+		return
+	}
+	writeJSON(w, http.StatusCreated, `{}`)
+}
+
+func (a *fakeAPI) storedHotels() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.hotels)
+}
+
+func (a *fakeAPI) hotelRequestCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hotelRequests
 }
 
 // enter counts a create as in flight and holds it for createDelay.
@@ -162,6 +216,8 @@ func TestExecute_seedsTheRequestedDaysStartingTomorrow(t *testing.T) {
 	require.Equal(t, []map[string]string{{"email": "admin@example.test", "password": "s3cret"}}, api.logins)
 	require.Contains(t, out.String(), "flights=1212")
 	require.Contains(t, out.String(), "created=1212 existing=0 failed=0")
+	require.Equal(t, hotelsPerSeed, api.storedHotels())
+	require.Contains(t, out.String(), "hotels=33")
 }
 
 func TestExecute_tomorrowIsCountedInJakartaTime(t *testing.T) {
@@ -188,6 +244,8 @@ func TestExecute_runningTwiceCreatesNothingNewAndSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, flightsPerDay, api.storedFlights())
 	require.Contains(t, out.String(), "created=0 existing=606 failed=0")
+	require.Equal(t, hotelsPerSeed, api.storedHotels())
+	require.Contains(t, out.String(), `msg="hotels seeded" created=0 existing=33 failed=0`)
 }
 
 func TestExecute_aLaterRunAddsOnlyTheNewDays(t *testing.T) {
@@ -285,6 +343,7 @@ func TestExecute_givesUpWhenEveryCreateFails(t *testing.T) {
 	require.ErrorContains(t, err, "of 8484 flights were tried")
 	require.Less(t, api.requestCount(), 50, "the run stops instead of sending all 8484")
 	require.Contains(t, out.String(), "INTERNAL_ERROR")
+	require.Zero(t, api.hotelRequestCount(), "a broken run does not go on to the hotels")
 }
 
 func TestExecute_reportsAnInterruptionWithTheProgressMade(t *testing.T) {
@@ -301,8 +360,10 @@ func TestExecute_reportsAnInterruptionWithTheProgressMade(t *testing.T) {
 	err := execute(ctx, []string{"-base-url", api.server.URL, "-workers", "1"}, adminEnv, fixedNow, &out)
 
 	require.ErrorContains(t, err, "interrupted after")
+	require.ErrorContains(t, err, "of 8484 flights", "the progress is the flights', not the hotels' that never started")
 	require.Less(t, api.storedFlights(), 200)
 	require.Contains(t, out.String(), "failed=0", "the interruption is not counted as a failure")
+	require.Zero(t, api.hotelRequestCount())
 }
 
 func TestExecute_failuresBelowTheLimitStillFailTheCommand(t *testing.T) {
@@ -324,6 +385,7 @@ func TestExecute_failuresBelowTheLimitStillFailTheCommand(t *testing.T) {
 
 	require.EqualError(t, err, "1 of 606 flights failed")
 	require.Equal(t, flightsPerDay-1, api.storedFlights())
+	require.Equal(t, hotelsPerSeed, api.storedHotels(), "a few failed flights do not keep the hotels out")
 }
 
 func TestExecute_sendsRequestsFromTheRequestedNumberOfWorkers(t *testing.T) {
@@ -334,4 +396,47 @@ func TestExecute_sendsRequestsFromTheRequestedNumberOfWorkers(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, 4, api.peakInFlight())
+}
+
+func TestExecute_seedsTheHotelsAfterTheFlights(t *testing.T) {
+	api := newFakeAPI(t)
+	var out bytes.Buffer
+
+	err := execute(context.Background(), []string{"-base-url", api.server.URL, "-days", "1"}, adminEnv, fixedNow, &out)
+
+	require.NoError(t, err)
+	require.Equal(t, hotelsPerSeed, api.storedHotels())
+	require.Contains(t, out.String(), `msg="flights seeded" created=606 existing=0 failed=0`)
+	require.Contains(t, out.String(), `msg="hotels seeded" created=33 existing=0 failed=0`)
+	require.Less(t, bytes.Index(out.Bytes(), []byte("flights seeded")), bytes.Index(out.Bytes(), []byte("hotels seeded")))
+}
+
+func TestExecute_failedHotelsFailTheCommand(t *testing.T) {
+	api := newFakeAPI(t)
+	api.failHotels = true
+	var out bytes.Buffer
+
+	err := execute(context.Background(), []string{"-base-url", api.server.URL, "-days", "1"}, adminEnv, fixedNow, &out)
+
+	require.EqualError(t, err, "33 of 33 hotels failed")
+	require.Equal(t, flightsPerDay, api.storedFlights(), "the flights are already in")
+	require.Contains(t, out.String(), "create hotel failed")
+}
+
+func TestExecute_reportsAnInterruptionDuringTheHotels(t *testing.T) {
+	api := newFakeAPI(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	api.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == createHotelPath && api.storedHotels() == 5 {
+			cancel()
+		}
+		api.serve(w, r)
+	})
+
+	err := execute(ctx, []string{"-base-url", api.server.URL, "-days", "1"}, adminEnv, fixedNow, &bytes.Buffer{})
+
+	require.ErrorContains(t, err, "interrupted after")
+	require.ErrorContains(t, err, "of 33 hotels")
+	require.Less(t, api.storedHotels(), hotelsPerSeed)
 }

@@ -38,6 +38,22 @@ type FlightInventory struct {
 	UpdatedAt           time.Time
 }
 
+type HotelBooking struct {
+	ID            string
+	UserID        string
+	RoomTypeID    string
+	Status        string
+	CheckIn       time.Time
+	CheckOut      time.Time
+	Guests        int32
+	GuestName     string
+	PricePerNight int64
+	ExpiresAt     time.Time
+	PaymentID     *string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 type Outbox struct {
 	ID          string
 	EventType   string
@@ -52,4 +68,25 @@ type Passenger struct {
 	Seq       int16
 	FullName  string
 	BirthDate time.Time
+}
+
+type RoomNight struct {
+	RoomTypeID string
+	Night      time.Time
+	TotalRooms int32
+	HeldRooms  int32
+	SoldRooms  int32
+	UpdatedAt  time.Time
+}
+
+type RoomType struct {
+	RoomTypeID    string
+	HotelID       string
+	HotelName     string
+	CityCode      string
+	Name          string
+	MaxGuests     int32
+	TotalRooms    int32
+	PricePerNight int64
+	CreatedAt     time.Time
 }

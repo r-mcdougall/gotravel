@@ -31,3 +31,20 @@ func TestNewFlightChangedEvent_leavesOutSeatAvailability(t *testing.T) {
 
 	require.NotContains(t, string(event.Payload), "available_seats")
 }
+
+func TestNewRoomTypeCreatedEvent_carriesWhatBookingNeedsToHoldRooms(t *testing.T) {
+	event, err := newRoomTypeCreatedEvent(sampleHotel(), sampleRoomType())
+	require.NoError(t, err)
+
+	require.Equal(t, "room_type.created", event.EventType)
+	require.JSONEq(t, `{
+		"room_type_id": "0b8e5d21-7c4a-4f19-8e36-5a2d9c1f7b40",
+		"hotel_id": "6f1c2a9e-3b7d-4c51-9a0e-2d8f4b6c1e73",
+		"hotel_name": "Seminyak Garden Hotel",
+		"city_code": "DPS",
+		"name": "Deluxe Double",
+		"max_guests": 2,
+		"total_rooms": 20,
+		"price_per_night": 850000
+	}`, string(event.Payload))
+}

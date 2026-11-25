@@ -11,6 +11,7 @@ import (
 type referenceQueries interface {
 	ListAirlines(ctx context.Context) ([]store.Airline, error)
 	ListAirports(ctx context.Context) ([]store.Airport, error)
+	ListCities(ctx context.Context) ([]store.City, error)
 }
 
 var _ referenceQueries = (*store.Queries)(nil)
@@ -23,6 +24,7 @@ type Airport struct {
 type Reference struct {
 	airlines map[string]AirlineResponse
 	airports map[string]Airport
+	cities   map[string]CityResponse
 }
 
 func LoadReference(ctx context.Context, q referenceQueries) (*Reference, error) {
@@ -34,10 +36,15 @@ func LoadReference(ctx context.Context, q referenceQueries) (*Reference, error) 
 	if err != nil {
 		return nil, fmt.Errorf("list airports: %w", err)
 	}
+	cities, err := q.ListCities(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list cities: %w", err)
+	}
 
 	reference := &Reference{
 		airlines: make(map[string]AirlineResponse, len(airlines)),
 		airports: make(map[string]Airport, len(airports)),
+		cities:   make(map[string]CityResponse, len(cities)),
 	}
 
 	for _, airline := range airlines {
@@ -49,6 +56,9 @@ func LoadReference(ctx context.Context, q referenceQueries) (*Reference, error) 
 			return nil, err
 		}
 		reference.airports[airport.Code] = a
+	}
+	for _, city := range cities {
+		reference.cities[city.Code] = CityResponse{Code: city.Code, Name: city.Name}
 	}
 
 	return reference, nil
@@ -62,6 +72,11 @@ func (r *Reference) Airline(code string) (AirlineResponse, bool) {
 func (r *Reference) Airport(code string) (Airport, bool) {
 	airport, ok := r.airports[code]
 	return airport, ok
+}
+
+func (r *Reference) City(code string) (CityResponse, bool) {
+	city, ok := r.cities[code]
+	return city, ok
 }
 
 func newAirport(airport store.Airport) (Airport, error) {

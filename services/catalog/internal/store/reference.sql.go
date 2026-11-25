@@ -61,3 +61,27 @@ func (q *Queries) ListAirports(ctx context.Context) ([]Airport, error) {
 	}
 	return items, nil
 }
+
+const listCities = `-- name: ListCities :many
+SELECT code, name FROM cities ORDER BY code
+`
+
+func (q *Queries) ListCities(ctx context.Context) ([]City, error) {
+	rows, err := q.db.Query(ctx, listCities)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []City
+	for rows.Next() {
+		var i City
+		if err := rows.Scan(&i.Code, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
