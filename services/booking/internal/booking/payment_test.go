@@ -180,3 +180,145 @@ func TestEventHandlerHandlePaymentSucceeded_eitherConfirmsOrLosesToTheExpirer(t 
 		}
 	}
 }
+
+func TestEventHandlerHandlePaymentSucceeded_confirmsAHeldHotelBookingAndSellsItsNights(t *testing.T) {
+	svc, pool, now := newTestService(t)
+	addRoomType(t, pool, 5, 2)
+	held, err := svc.HoldRoom(t.Context(), johnID, hotelHold(now, 7, 10))
+	require.NoError(t, err)
+	_, err = svc.HoldRoom(t.Context(), janeID, hotelHold(now, 8, 9))
+	require.NoError(t, err)
+	handler := NewEventHandler(NewPgStore(pool))
+
+	require.NoError(t, handler.HandlePaymentSucceeded(t.Context(), paymentSucceededDelivery(testPaymentID, held.ID)))
+
+	confirmed, err := svc.GetHotelBooking(t.Context(), johnID, held.ID)
+	require.NoError(t, err)
+	require.Equal(t, "CONFIRMED", confirmed.Status)
+	require.Equal(t, testPaymentID, *confirmed.PaymentID)
+
+	want := map[string][2]int32{day(now, 7): {0, 1}, day(now, 8): {1, 1}, day(now, 9): {0, 1}}
+	require.Equal(t, want, roomNights(t, pool), "John's nights move from held to sold; Jane's hold stays")
+	require.Zero(t, count(t, pool, "outbox"), "a hotel confirmation announces nothing")
+
+	require.NoError(t, handler.HandlePaymentSucceeded(t.Context(), paymentSucceededDelivery(testPaymentID, held.ID)))
+	require.Equal(t, want, roomNights(t, pool), "a repeated message changes nothing")
+	require.Zero(t, count(t, pool, "outbox"))
+}
+
+func TestEventHandlerHandlePaymentSucceeded_rejectsAPaymentForAHotelBookingThatIsNotHeld(t *testing.T) {
+	tests := []struct {
+		name       string
+		prepare    func(t *testing.T, svc *service, pool *pgxpool.Pool, bookingID string)
+		wantReason string
+	}{
+		{
+			name: "expired",
+			prepare: func(t *testing.T, _ *service, pool *pgxpool.Pool, bookingID string) {
+				_, err := pool.Exec(t.Context(), `UPDATE hotel_bookings SET expires_at = now() - interval '1 second' WHERE id = $1`, bookingID)
+				require.NoError(t, err)
+				n, err := NewHotelExpirer(NewPgStore(pool), &fakeCounter{}, slog.New(slog.DiscardHandler)).expireBatch(t.Context())
+				require.NoError(t, err)
+				require.Equal(t, 1, n)
+			},
+			wantReason: "booking_expired",
+		},
+		{
+			name: "cancelled",
+			prepare: func(t *testing.T, svc *service, _ *pgxpool.Pool, bookingID string) {
+				_, err := svc.CancelHotelBooking(t.Context(), johnID, bookingID)
+				require.NoError(t, err)
+			},
+			wantReason: "booking_cancelled",
+		},
+		{
+			name: "confirmed by another payment",
+			prepare: func(t *testing.T, _ *service, pool *pgxpool.Pool, bookingID string) {
+				handler := NewEventHandler(NewPgStore(pool))
+				require.NoError(t, handler.HandlePaymentSucceeded(t.Context(), paymentSucceededDelivery(otherPaymentID, bookingID)))
+			},
+			wantReason: "booking_paid_by_another_payment",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, pool, now := newTestService(t)
+			addRoomType(t, pool, 5, 2)
+			held, err := svc.HoldRoom(t.Context(), johnID, hotelHold(now, 7, 9))
+			require.NoError(t, err)
+			tt.prepare(t, svc, pool, held.ID)
+			before := roomNights(t, pool)
+			handler := NewEventHandler(NewPgStore(pool))
+
+			require.NoError(t, handler.HandlePaymentSucceeded(t.Context(), paymentSucceededDelivery(testPaymentID, held.ID)))
+
+			require.Equal(t, before, roomNights(t, pool), "no night moves")
+			require.JSONEq(t,
+				fmt.Sprintf(`{"payment_id":%q,"booking_id":%q,"reason":%q}`, testPaymentID, held.ID, tt.wantReason),
+				latestRejection(t, pool))
+		})
+	}
+}
+
+func TestEventHandlerHandlePaymentSucceeded_eitherConfirmsAHotelBookingOrLosesToTheExpirer(t *testing.T) {
+	for i := range 20 {
+		svc, pool, now := newTestService(t)
+		addRoomType(t, pool, 5, 2)
+		held, err := svc.HoldRoom(t.Context(), johnID, hotelHold(now, 7, 10))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), `UPDATE hotel_bookings SET expires_at = now() - interval '1 second' WHERE id = $1`, held.ID)
+		require.NoError(t, err)
+
+		handler := NewEventHandler(NewPgStore(pool))
+		expirer := NewHotelExpirer(NewPgStore(pool), &fakeCounter{}, slog.New(slog.DiscardHandler))
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		go func() {
+			<-start
+			errs <- handler.HandlePaymentSucceeded(t.Context(), paymentSucceededDelivery(testPaymentID, held.ID))
+		}()
+		go func() {
+			<-start
+			// The handler needs one more round trip before it reaches the hotel booking; a varying head start
+			// lets it win some of the races.
+			time.Sleep(time.Duration(i%4) * time.Millisecond)
+			_, err := expirer.expireBatch(t.Context())
+			errs <- err
+		}()
+		close(start)
+		require.NoError(t, <-errs)
+		require.NoError(t, <-errs)
+
+		booking, err := svc.GetHotelBooking(t.Context(), johnID, held.ID)
+		require.NoError(t, err)
+		switch booking.Status {
+		case "CONFIRMED":
+			require.Equal(t, map[string][2]int32{day(now, 7): {0, 1}, day(now, 8): {0, 1}, day(now, 9): {0, 1}}, roomNights(t, pool))
+		case "EXPIRED":
+			require.Equal(t, map[string][2]int32{day(now, 7): {0, 0}, day(now, 8): {0, 0}, day(now, 9): {0, 0}}, roomNights(t, pool))
+			require.Contains(t, latestRejection(t, pool), `"reason": "booking_expired"`)
+		default:
+			t.Fatalf("hotel booking ended %s", booking.Status)
+		}
+	}
+}
+
+// roomNights returns the held and sold rooms of the test room type per night.
+func roomNights(t *testing.T, pool *pgxpool.Pool) map[string][2]int32 {
+	t.Helper()
+
+	rows, err := pool.Query(t.Context(), `SELECT night, held_rooms, sold_rooms FROM room_nights WHERE room_type_id = $1`, testRoomTypeID)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	nights := map[string][2]int32{}
+	for rows.Next() {
+		var night time.Time
+		var held, sold int32
+		require.NoError(t, rows.Scan(&night, &held, &sold))
+		nights[night.Format(time.DateOnly)] = [2]int32{held, sold}
+	}
+	require.NoError(t, rows.Err())
+	return nights
+}
